@@ -102,13 +102,19 @@ if(WASM)
     list(APPEND qprompt_cpp wasmintegration.h wasmintegration.cpp)
 endif()
 
-# Voice tracking alignment engine. Deliberately free of Qt types so it can be
-# tested without a GUI or an event loop; see voicetracking/README.md.
+# Voice tracking. The engine under voicetracking/ is deliberately free of Qt
+# types so it can be tested without a GUI or an event loop; voicetracker.{h,cpp}
+# is the only part that knows about Qt, and is what QML talks to. See
+# voicetracking/README.md.
 if(QPROMPT_VOICE_TRACKING_ENABLED)
     list(APPEND qprompt_cpp
         voicetracking/textnormalize.h voicetracking/textnormalize.cpp
         voicetracking/scriptmodel.h voicetracking/scriptmodel.cpp
         voicetracking/aligner.h voicetracking/aligner.cpp
+        voicetracking/scrollcontroller.h voicetracking/scrollcontroller.cpp
+        voicetracking/speechrecognizer.h voicetracking/speechrecognizer.cpp
+        voicetracking/audiocapture.h voicetracking/audiocapture.mm
+        voicetracker.h voicetracker.cpp
     )
 endif()
 
@@ -166,6 +172,7 @@ set(prompter_sources
     prompter/Find.qml
     prompter/CursorAutoHide.qml
     prompter/PointerSettings.qml
+    prompter/VoiceTracking.qml
     # Pointers
     prompter/pointers/pointer_0.qml
     prompter/pointers/pointer_1.qml
@@ -519,6 +526,22 @@ if (QHotkey_FOUND)
     )
 endif()
 
+# Voice tracking: whisper for recognition, AVFoundation for the microphone.
+# QPROMPT_VOICE_TRACKING guards every voice-tracking-specific line of C++, so a
+# build with the feature off compiles the same sources into no-ops rather than
+# needing a second set of files.
+if(QPROMPT_VOICE_TRACKING_ENABLED)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE QPROMPT_VOICE_TRACKING)
+    target_link_libraries(${PROJECT_NAME} PRIVATE whisper)
+    if(APPLE)
+        target_link_libraries(${PROJECT_NAME} PRIVATE
+            "-framework AVFoundation"
+            "-framework CoreAudio"
+            "-framework AudioToolbox"
+        )
+    endif()
+endif()
+
 if(HUNSPELL_ENABLED)
     if(TARGET Hunspell::Hunspell)
         target_link_libraries(${PROJECT_NAME} PRIVATE Hunspell::Hunspell)
@@ -648,4 +671,93 @@ if(QPROMPT_VOICE_TRACKING_ENABLED AND QPROMPT_VOICE_TRACKING_TESTS)
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     add_test(NAME voicetracking_alignment
              COMMAND qprompt_voicetracking_tests)
+
+    # Control law. Separate binary from the aligner tests so a failure names
+    # which half broke without having to read the output.
+    add_executable(qprompt_scrollcontroller_tests
+        voicetracking/scrollcontroller.cpp
+        voicetracking/tests/scrollcontroller_tests.cpp
+    )
+    set_target_properties(qprompt_scrollcontroller_tests PROPERTIES
+        AUTOMOC OFF
+        AUTOUIC OFF
+        AUTORCC OFF
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+        MACOSX_BUNDLE FALSE
+        WIN32_EXECUTABLE FALSE
+    )
+    target_include_directories(qprompt_scrollcontroller_tests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME voicetracking_control
+             COMMAND qprompt_scrollcontroller_tests)
+
+    # Audio capture and the whisper driver. Needs whisper and the macOS audio
+    # frameworks, so unlike the two above it is not pure C++17.
+    add_executable(qprompt_speechrecognizer_tests
+        voicetracking/textnormalize.cpp
+        voicetracking/scriptmodel.cpp
+        voicetracking/aligner.cpp
+        voicetracking/audiocapture.mm
+        voicetracking/speechrecognizer.cpp
+        voicetracking/tests/speechrecognizer_tests.cpp
+    )
+    set_target_properties(qprompt_speechrecognizer_tests PROPERTIES
+        AUTOMOC OFF
+        AUTOUIC OFF
+        AUTORCC OFF
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+        MACOSX_BUNDLE FALSE
+        WIN32_EXECUTABLE FALSE
+    )
+    target_include_directories(qprompt_speechrecognizer_tests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(qprompt_speechrecognizer_tests PRIVATE whisper)
+    if(APPLE)
+        target_link_libraries(qprompt_speechrecognizer_tests PRIVATE
+            "-framework AVFoundation"
+            "-framework CoreAudio"
+            "-framework AudioToolbox"
+            "-framework CoreMedia"
+            "-framework Foundation"
+        )
+    endif()
+    add_test(NAME voicetracking_speech
+             COMMAND qprompt_speechrecognizer_tests)
+
+    # Offline replay harness. Not a test -- it needs a model, a recording and a
+    # script -- but built alongside them so it cannot rot. This is the tool for
+    # tuning the aligner and controller constants against real audio instead of
+    # in front of a live microphone. See voicetracking/README.md.
+    add_executable(qprompt_replay_harness
+        voicetracking/textnormalize.cpp
+        voicetracking/scriptmodel.cpp
+        voicetracking/aligner.cpp
+        voicetracking/scrollcontroller.cpp
+        voicetracking/audiocapture.mm
+        voicetracking/speechrecognizer.cpp
+        voicetracking/tests/replay_harness.cpp
+    )
+    set_target_properties(qprompt_replay_harness PROPERTIES
+        AUTOMOC OFF
+        AUTOUIC OFF
+        AUTORCC OFF
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+        MACOSX_BUNDLE FALSE
+        WIN32_EXECUTABLE FALSE
+    )
+    target_include_directories(qprompt_replay_harness
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(qprompt_replay_harness PRIVATE whisper)
+    if(APPLE)
+        target_link_libraries(qprompt_replay_harness PRIVATE
+            "-framework AVFoundation"
+            "-framework CoreAudio"
+            "-framework AudioToolbox"
+            "-framework CoreMedia"
+            "-framework Foundation"
+        )
+    endif()
 endif()

@@ -145,6 +145,43 @@ the fix is a substring/containment term in `similarityCore()` for the case where
 one token wholly contains the other; it was left out here to avoid the false
 positives that unrestricted substring matching invites on short tokens.
 
+## End-to-end results
+
+The replay harness (`qprompt_replay_harness`) runs the real pipeline --
+whisper -> aligner -> controller -> simulated scroll -- over a recording, with
+no GUI and no microphone. It is the tool for tuning the constants below against
+real audio rather than in front of a live camera.
+
+```sh
+./build/bin/qprompt_replay_harness \
+    --model models/ggml-base.bin \
+    --audio recording.wav \
+    --script script.txt \
+    --language hu [--verbose]
+```
+
+Measured on synthesized Hungarian speech (`say -v Tünde`, 57-token script):
+
+| | Hungarian | English | Hungarian audio vs unrelated script |
+|---|---|---|---|
+| Observations | 50 | 18 | 50 |
+| Confident | 43 (86%) | 15 (83%) | 0 |
+| Script reached | 55/57 (96%) | 21/24 (88%) | 0/32 (0%) |
+| Backward jumps | 0 | 0 | 0 |
+| Verdict | PASS | PASS | **FAIL, as intended** |
+
+The third column is the negative control, and it matters as much as the first
+two: given audio that does not correspond to the script at all, the engine
+declines to match anything, keeps scrolling at the fallback rate rather than
+freezing, and the harness reports FAIL. Without that column the 96% figure
+would not be evidence of anything -- a matcher that always says yes would score
+the same on the first two.
+
+A verbose trace of the Hungarian run shows the intended shape: the token index
+advances monotonically, velocity ramps smoothly under the acceleration limit
+rather than stepping, and where confidence dips (0.66 during the ramp-up
+windows) the controller drops to `coast` and keeps moving instead of jumping.
+
 ## Safety posture
 
 The engine is built to **coast, not guess**. `confident = false` means "keep

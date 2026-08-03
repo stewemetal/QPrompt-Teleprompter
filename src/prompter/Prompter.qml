@@ -142,6 +142,10 @@ Flickable {
     property alias wordSpacing: editor.font.wordSpacing
     // Create position alias to make code more readable
     property alias position: prompter.contentY
+    // Exposed so an external driver (voice tracking) can suppress the scroll
+    // animation for one assignment and place the position instantly, instead
+    // of easing there over the current -- possibly minutes long -- duration.
+    property alias motion: motion
     property alias keys: keys
     property alias ws: ws
     // Flips
