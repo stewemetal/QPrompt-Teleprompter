@@ -68,6 +68,42 @@ set(KF_MIN_VERSION 6.9.0)
 set(KF_PREFFERED_VERSION 6.24.0)
 if (APPLE)
     set(APPLE_SUPPRESS_X11_WARNING ON)
+    # Qt's FindWrapOpenGL.cmake unconditionally links AGL, falling back to a
+    # literal "-framework AGL" when find_library() turns up nothing. Apple
+    # removed the long-deprecated AGL framework from the macOS SDK (absent as of
+    # SDK 26), so that fallback reaches the linker and fails with
+    # "ld: framework 'AGL' not found" while building Kirigami. Qt only needs
+    # OpenGL.framework, which is still present.
+    #
+    # Testing for AGL's presence with find_library() is not enough: the
+    # framework directory still exists at /System/Library/Frameworks on a
+    # running system, so the probe reports success, yet the SDK carries no stub
+    # for it and the link still fails. Since the linker resolves -framework
+    # against the active SDK, the SDK is the thing to probe. CMAKE_OSX_SYSROOT
+    # is not populated this early (project() sets it), so ask xcrun directly.
+    #
+    # The module keeps whatever find_library() stored in the WrapOpenGL_AGL
+    # cache entry and only substitutes the broken literal when that value is
+    # falsy, so when AGL is absent from the SDK we point the cache entry at
+    # OpenGL.framework: a real, linkable framework, so the value stays truthy,
+    # the bad fallback never runs, and the duplicate OpenGL link entry is
+    # harmless. Builds on older SDKs that still ship AGL are unaffected.
+    execute_process(
+        COMMAND xcrun --show-sdk-path
+        OUTPUT_VARIABLE QPROMPT_MACOS_SDK_PATH
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if (QPROMPT_MACOS_SDK_PATH AND EXISTS "${QPROMPT_MACOS_SDK_PATH}/System/Library/Frameworks/AGL.framework")
+        set(QPROMPT_AGL_LINKABLE TRUE)
+    else()
+        set(QPROMPT_AGL_LINKABLE FALSE)
+    endif()
+    if (NOT QPROMPT_AGL_LINKABLE)
+        find_library(QPROMPT_OPENGL_FRAMEWORK NAMES OpenGL REQUIRED)
+        set(WrapOpenGL_AGL "${QPROMPT_OPENGL_FRAMEWORK}"
+            CACHE FILEPATH "AGL is not linkable against this macOS SDK; link OpenGL instead" FORCE)
+    endif()
 endif()
 # ------------------------- BEGIN: lists to maintain manually -------------------------
 # Directories where Qt Creator can find modules and Kirigami's QML files
@@ -180,12 +216,14 @@ if(WIN32 OR APPLE OR ANDROID OR WASM OR USE_GIT_DEPENDENCIES_ONLY)
         # value stays a defined boolean; dladdr-based libexec lookup has no
         # meaning on WASM anyway.
         set(HAVE_DLADDR 0 CACHE INTERNAL "")
-        # Both KCoreAddons and Kirigami unconditionally include(ECMGenerateQDoc),
-        # which creates global doc targets without an include guard. Building
-        # both frameworks in one tree then fails with duplicate-target errors, so
-        # shadow the module with a no-op shim (see cmake/wasm-shims).
-        list(PREPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/wasm-shims")
     endif()
+    # Both KCoreAddons and Kirigami unconditionally include(ECMGenerateQDoc),
+    # which creates global doc targets without an include guard. Building both
+    # frameworks in one tree therefore fails with duplicate-target errors, so
+    # shadow the module with a no-op shim (see cmake/wasm-shims). This affects
+    # every platform that bundles both frameworks via FetchContent — not just
+    # WASM — so the shim is applied to the whole bundled-framework branch.
+    list(PREPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/wasm-shims")
     FetchContent_Declare(
       CoreAddons
       GIT_REPOSITORY "${CMAKE_SOURCE_DIR}/3rdparty/kcoreaddons"
