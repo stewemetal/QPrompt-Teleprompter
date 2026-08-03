@@ -102,6 +102,16 @@ if(WASM)
     list(APPEND qprompt_cpp wasmintegration.h wasmintegration.cpp)
 endif()
 
+# Voice tracking alignment engine. Deliberately free of Qt types so it can be
+# tested without a GUI or an event loop; see voicetracking/README.md.
+if(QPROMPT_VOICE_TRACKING_ENABLED)
+    list(APPEND qprompt_cpp
+        voicetracking/textnormalize.h voicetracking/textnormalize.cpp
+        voicetracking/scriptmodel.h voicetracking/scriptmodel.cpp
+        voicetracking/aligner.h voicetracking/aligner.cpp
+    )
+endif()
+
 if (WASM)
     set(qprompt_frontend_sources
         # Kirigami UI Frontend
@@ -537,9 +547,22 @@ elseif (WIN32 OR UNIX)
 endif()
 
 if(APPLE AND NOT IOS)
-    set(MACOS_SIGNING_IDENTITY "")
+    # Empty by default: a developer build has no notarization identity, and
+    # release builds set one explicitly. Cached so it can be supplied from the
+    # command line without editing this file.
+    set(MACOS_SIGNING_IDENTITY "" CACHE STRING
+        "macOS signing identity used by macdeployqt for notarization")
     set(EXTRA_DEPLOY_QML_APP_SCRIPT_OPTIONS)
-    set(deploy_tool_options_arg "-always-overwrite -appstore-compliant -sign-for-notarization=${MACOS_SIGNING_IDENTITY}")
+    # Passing -sign-for-notarization= with an empty identity is not the same as
+    # not passing it: macdeployqt takes the empty value, fails with
+    # "no identity found", and aborts the deploy step -- which silently leaves
+    # the bundle without its QML modules, so the app starts and then dies with
+    # 'module "org.kde.kirigami" plugin "Kirigamiplugin" not found'. Only ask
+    # for notarization signing when there is an identity to sign with.
+    set(deploy_tool_options_arg "-always-overwrite -appstore-compliant")
+    if(MACOS_SIGNING_IDENTITY)
+        string(APPEND deploy_tool_options_arg " -sign-for-notarization=${MACOS_SIGNING_IDENTITY}")
+    endif()
     list(APPEND EXTRA_DEPLOY_QML_APP_SCRIPT_OPTIONS DEPLOY_TOOL_OPTIONS ${deploy_tool_options_arg})
     qt_generate_deploy_qml_app_script(
         TARGET ${PROJECT_NAME}
@@ -592,4 +615,37 @@ else()
 endif()
 if (NOT UNIX OR APPLE)
     install(SCRIPT ${deploy_script})
+endif()
+
+# Voice tracking alignment tests.
+#
+# These get their own switch rather than riding on BUILD_TESTING, which the
+# top-level CMakeLists forces OFF for every platform that bundles the KDE
+# frameworks (macOS included) so those frameworks do not add their own test
+# targets. The alignment engine is plain C++17 with no Qt, GUI or event loop, so
+# its tests have none of the cost that motivated turning BUILD_TESTING off.
+option(QPROMPT_VOICE_TRACKING_TESTS "Build voice tracking alignment tests" ON)
+if(QPROMPT_VOICE_TRACKING_ENABLED AND QPROMPT_VOICE_TRACKING_TESTS)
+    enable_testing()
+    add_executable(qprompt_voicetracking_tests
+        voicetracking/textnormalize.cpp
+        voicetracking/scriptmodel.cpp
+        voicetracking/aligner.cpp
+        voicetracking/tests/aligner_tests.cpp
+    )
+    # AUTOMOC is on project-wide; this target has no Q_OBJECT to scan and no Qt
+    # include paths, so leave it out of the moc pass entirely.
+    set_target_properties(qprompt_voicetracking_tests PROPERTIES
+        AUTOMOC OFF
+        AUTOUIC OFF
+        AUTORCC OFF
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+        MACOSX_BUNDLE FALSE
+        WIN32_EXECUTABLE FALSE
+    )
+    target_include_directories(qprompt_voicetracking_tests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME voicetracking_alignment
+             COMMAND qprompt_voicetracking_tests)
 endif()

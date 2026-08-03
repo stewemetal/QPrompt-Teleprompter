@@ -72,3 +72,7 @@ Makefile
 
 # Agent working documents (local only)
 agents/
+
+# Whisper speech models for voice tracking. Large binaries fetched on demand
+# rather than vendored; see src/voicetracking/README.md.
+models/

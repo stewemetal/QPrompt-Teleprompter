@@ -304,6 +304,51 @@ if(NOT ANDROID AND NOT IOS AND NOT WASM)
         Widgets
     )
 endif()
+
+# Voice tracking: scroll the prompter at the pace the speaker is actually
+# reading, instead of at a constant speed. Speech recognition runs locally
+# through whisper.cpp, which keeps the script audio on the machine and works
+# offline. A local model is what makes non-English support practical: Apple's
+# Speech framework has no on-device asset for Hungarian and would fall back to
+# server-based recognition.
+#
+# macOS only for now. The aligner itself is portable C++17, but audio capture
+# and the permission handling around it are per-platform, so the feature is
+# gated until other backends exist.
+option(QPROMPT_VOICE_TRACKING "Build voice tracking (local speech recognition)" ON)
+if(QPROMPT_VOICE_TRACKING AND APPLE AND NOT IOS)
+    if(NOT EXISTS "${CMAKE_SOURCE_DIR}/3rdparty/whisper.cpp/CMakeLists.txt")
+        message(FATAL_ERROR
+            "QPROMPT_VOICE_TRACKING is ON but 3rdparty/whisper.cpp is missing. "
+            "Run: git submodule update --init --recursive "
+            "(or configure with -DQPROMPT_VOICE_TRACKING=OFF).")
+    endif()
+    # Build only the library. whisper's examples pull in SDL2 and extra tools
+    # that QPrompt has no use for, and its tests would join our test target.
+    set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
+    # Static, so the .app does not need extra dylibs deployed beside it. Set as
+    # a normal variable and restored afterwards: QHotkey above is built shared
+    # via the same global switch, so forcing the cache entry here would leak
+    # into it on the next configure.
+    set(_qprompt_saved_build_shared_libs "${BUILD_SHARED_LIBS}")
+    set(BUILD_SHARED_LIBS OFF)
+    # Metal and Accelerate are both present on supported Macs and take encode
+    # for a sliding window down to tens of milliseconds, which is what makes
+    # real-time tracking feasible.
+    set(GGML_METAL ON CACHE BOOL "" FORCE)
+    set(GGML_ACCELERATE ON CACHE BOOL "" FORCE)
+    # ggml embeds its Metal shaders in the binary; otherwise the .app would have
+    # to locate a .metallib at runtime.
+    set(GGML_METAL_EMBED_LIBRARY ON CACHE BOOL "" FORCE)
+    add_subdirectory("3rdparty/whisper.cpp" build/whisper EXCLUDE_FROM_ALL)
+    set(BUILD_SHARED_LIBS "${_qprompt_saved_build_shared_libs}")
+    unset(_qprompt_saved_build_shared_libs)
+    set(QPROMPT_VOICE_TRACKING_ENABLED TRUE)
+else()
+    set(QPROMPT_VOICE_TRACKING_ENABLED FALSE)
+endif()
 # Hunspell spell checking. Hunspell upstream ships only autotools/MSVC
 # project files, so on platforms where a system package or vcpkg/Craft
 # install isn't available we build the library straight from the
@@ -427,6 +472,14 @@ set(DESCRIPTION_FILE "DESCRIPTION.txt")
 list(APPEND DOCS ${LICENSE_FILE} ${README_FILE} ${DESCRIPTION_FILE} "COPYING.ASSETS")
 
 set(DOC_INSTALL_DIR "share/doc/qprompt")
+
+# ctest only discovers tests from subdirectories when testing is enabled at the
+# top level, so this must precede add_subdirectory(src). It is not the same
+# switch as BUILD_TESTING, which is forced OFF above for the bundled KDE
+# frameworks; the voice tracking tests are plain C++17 and opt in separately.
+if(QPROMPT_VOICE_TRACKING_ENABLED)
+    enable_testing()
+endif()
 
 add_subdirectory(src)
 

@@ -22,3 +22,7 @@
 [submodule "3rdparty/hunspell"]
 	path = 3rdparty/hunspell
 	url = https://github.com/hunspell/hunspell.git
+[submodule "3rdparty/whisper.cpp"]
+	path = 3rdparty/whisper.cpp
+	url = https://github.com/ggml-org/whisper.cpp.git
+	branch = v1.9.1
