@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    macOS bundle template.
+
+    Derived from Qt's own macos/Info.plist.app.in (lib/cmake/Qt6/macos/) rather
+    than from src/Info.plist.in, which targets iOS and carries keys that do not
+    apply here. Keeping this in sync with Qt's template matters: without a
+    custom MACOSX_BUNDLE_INFO_PLIST, CMake/Qt generate the bundle plist from
+    that file, so anything dropped here is silently lost from the bundle.
+
+    CFBundleLocalizations is deliberately absent. Qt appends it after
+    generation via PlistBuddy, but only when the key is not already present
+    (see _qt_internal_apple_update_bundle_languages in
+    QtPublicAppleHelpers.cmake). Hardcoding it here would freeze the language
+    list and stop it tracking the translations actually built.
+
+    QPrompt-specific addition: NSMicrophoneUsageDescription, required for the
+    voice tracking feature. macOS terminates an app that reaches for the
+    microphone without this key, so it must ship in the bundle even though
+    capture is opt-in and off by default.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+
+	<key>CFBundleName</key>
+	<string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
+	<key>CFBundleIdentifier</key>
+	<string>${MACOSX_BUNDLE_GUI_IDENTIFIER}</string>
+	<key>CFBundleExecutable</key>
+	<string>${MACOSX_BUNDLE_EXECUTABLE_NAME}</string>
+
+	<key>CFBundleVersion</key>
+	<string>${MACOSX_BUNDLE_BUNDLE_VERSION}</string>
+	<key>CFBundleShortVersionString</key>
+	<string>${MACOSX_BUNDLE_SHORT_VERSION_STRING}</string>
+
+	<key>LSMinimumSystemVersion</key>
+	<string>${CMAKE_OSX_DEPLOYMENT_TARGET}</string>
+
+	<key>NSHumanReadableCopyright</key>
+	<string>${MACOSX_BUNDLE_COPYRIGHT}</string>
+
+	<key>CFBundleIconFile</key>
+	<string>${MACOSX_BUNDLE_ICON_FILE}</string>
+
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleAllowMixedLocalizations</key>
+	<true/>
+
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+
+	<key>NSMicrophoneUsageDescription</key>
+	<string>QPrompt uses the microphone to follow along as you read, so the script scrolls at your speaking pace. Audio is processed on this device and is never recorded or sent anywhere.</string>
+</dict>
+</plist>

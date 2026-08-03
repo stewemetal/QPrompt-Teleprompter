@@ -491,6 +491,16 @@ if(APPLE AND NOT IOS)
     target_include_directories(mactouchbar PRIVATE ${kdmactouchbar_SOURCE_DIR}/KDMacTouchBar)
     target_link_directories(mactouchbar PRIVATE ${kdmactouchbar_SOURCE_DIR}/KDMacTouchBar)
     target_link_libraries(${PROJECT_NAME} PRIVATE KDMacTouchBar)
+
+    # Without a custom template, the bundle plist is generated from Qt's
+    # macos/Info.plist.app.in, which has no usage-description keys. macOS
+    # terminates an app that touches the microphone without
+    # NSMicrophoneUsageDescription, so voice tracking needs this template even
+    # though capture is opt-in. macos/Info.plist.in mirrors Qt's file and adds
+    # only that key; see the comment there before editing it.
+    set_target_properties(${PROJECT_NAME} PROPERTIES
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/macos/Info.plist.in"
+    )
 endif()
 if (QHotkey_FOUND)
     add_definitions(-DQHotkey_FOUND)
