@@ -54,6 +54,12 @@ Kirigami.Page {
     property alias velocityIndicatorVisible: velocityIndicator.visible
     property int hideDecorations: 1
     property bool spellcheckUserEnabled: false
+    // Voice tracking: the user's request and the recognition language, both
+    // persisted below. Whisper wants the language up front, and a script's
+    // language is known before reading starts, so this is an explicit choice
+    // rather than something detected from the audio.
+    property bool voiceTrackingEnabled: false
+    property string voiceTrackingLanguage: "en"
 
     // Unused signal. Leaving for reference.
     //signal test( bool data )
@@ -625,6 +631,58 @@ Kirigami.Page {
                     customWordsSheet.open()
                     contextDrawer.close()
                 }
+            }
+        },
+        Kirigami.Action {
+            id: voiceTrackingButton
+            text: qsTr("Voice tracking", "Speech-following scroll menu")
+            // Hidden rather than disabled where the feature was compiled out or
+            // the platform has no capture backend: offering a control that
+            // cannot work is worse than not offering one.
+            visible: viewport.voiceTracking.available
+            Kirigami.Action {
+                id: toggleVoiceTrackingButton
+                text: qsTr("Follow my voice", "Toggle speech-following scroll on or off")
+                checkable: true
+                checked: prompterPage.voiceTrackingEnabled
+                // Without a speech model there is nothing to recognise with, so
+                // the toggle stays inert and the entry below says why.
+                enabled: viewport.voiceTracking.modelAvailable
+                onTriggered: {
+                    prompterPage.voiceTrackingEnabled = checked
+                }
+            }
+            Kirigami.Action {
+                id: voiceTrackingLanguageButton
+                text: qsTr("Language", "Speech recognition language")
+                enabled: viewport.voiceTracking.modelAvailable
+                Kirigami.Action {
+                    text: qsTr("English", "Speech recognition language")
+                    checkable: true
+                    checked: prompterPage.voiceTrackingLanguage === "en"
+                    onTriggered: prompterPage.voiceTrackingLanguage = "en"
+                }
+                Kirigami.Action {
+                    text: qsTr("Hungarian", "Speech recognition language")
+                    checkable: true
+                    checked: prompterPage.voiceTrackingLanguage === "hu"
+                    onTriggered: prompterPage.voiceTrackingLanguage = "hu"
+                }
+            }
+            // Status line. Reports the one thing that is otherwise invisible:
+            // whether the prompter is actually following the speaker, or has
+            // lost them and fallen back to the constant rate.
+            Kirigami.Action {
+                enabled: false
+                text: !viewport.voiceTracking.modelAvailable
+                      ? qsTr("No speech model installed", "Voice tracking status")
+                      : viewport.voiceTracking.errorString
+                        ? viewport.voiceTracking.errorString
+                        : !viewport.voiceTracking.active
+                          ? qsTr("Not listening", "Voice tracking status")
+                          : viewport.voiceTracking.coasting
+                            ? qsTr("Listening — lost the script", "Voice tracking status")
+                            : qsTr("Following your voice", "Voice tracking status")
             }
         },
         Kirigami.Action {
@@ -1245,6 +1303,21 @@ Kirigami.Page {
     Settings {
         category: "spellcheck"
         property alias userEnabled: prompterPage.spellcheckUserEnabled
+    }
+    Settings {
+        category: "voiceTracking"
+        property alias enabled: prompterPage.voiceTrackingEnabled
+        property alias language: prompterPage.voiceTrackingLanguage
+    }
+    Binding {
+        target: viewport
+        property: "voiceTrackingRequested"
+        value: prompterPage.voiceTrackingEnabled
+    }
+    Binding {
+        target: viewport.voiceTracking
+        property: "language"
+        value: prompterPage.voiceTrackingLanguage
     }
     Binding {
         target: viewport.document

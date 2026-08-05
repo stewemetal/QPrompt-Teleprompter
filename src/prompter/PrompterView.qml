@@ -31,6 +31,7 @@ Item {
     id: viewport
 
     property alias prompter: prompter
+    property alias voiceTracking: voiceTracking
     property alias editor: prompter.editor
     property alias document: prompter.document
     property alias openDialog: prompter.openDialog
@@ -42,6 +43,10 @@ Item {
     property alias mouse: mouse
     //property bool project: true
     property int forcedOrientation: 0
+    // Set by the toolbar toggle. Separate from VoiceTracking's own `enabled` so
+    // that leaving prompting mode suspends tracking without forgetting that the
+    // user asked for it.
+    property bool voiceTrackingRequested: false
     property real __baseSpeed: editorToolbar.baseSpeedSlider.value
     property real __curvature: editorToolbar.baseAccelerationSlider.value
     property double __overlayOpacity: 0.4
@@ -230,6 +235,28 @@ Item {
     ShaderEffectSource {
         id: prompterShadowSource
         sourceItem: prompter
+    }
+
+    // Speech-following scroll. Instantiated here because this is the only scope
+    // holding both the prompter and the editor: the tracker reports a character
+    // offset into the script, and turning that into a scroll position needs the
+    // text document's layout.
+    //
+    // Tracking only runs while prompting. During editing the offset->pixel
+    // mapping moves the cursor as a side effect, which would fight the user, and
+    // there is nothing to scroll anyway.
+    //
+    // Held in a property rather than as a default child because VoiceTracking is
+    // a QtObject: a non-visual object in an Item's default (data) property makes
+    // Qt warn that a created graphical object was never placed in the scene.
+    property VoiceTracking voiceTrackingController: VoiceTracking {
+        id: voiceTracking
+        prompter: prompter
+        editor: prompter.editor
+        enabled: viewport.voiceTrackingRequested
+                 && available
+                 && modelAvailable
+                 && parseInt(prompter.state) !== Prompter.States.Editing
     }
 
     Prompter {

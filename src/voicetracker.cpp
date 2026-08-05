@@ -23,6 +23,7 @@
 
 #include <QElapsedTimer>
 #include <QFileInfo>
+#include <QLoggingCategory>
 #include <QStandardPaths>
 #include <QTimer>
 
@@ -34,6 +35,12 @@
 
 using namespace qprompt::voicetracking;
 #endif
+
+// Off by default; enable with QT_LOGGING_RULES="qprompt.voicetracking.debug=true".
+// Worth having permanently: every failure mode here (missing model, denied
+// microphone, model that will not load) otherwise surfaces only as a line of
+// text in a menu, which is impossible to inspect from a terminal or a log file.
+Q_LOGGING_CATEGORY(lcVoiceTracking, "qprompt.voicetracking")
 
 namespace {
 // Used only until QML reports real metrics. Roughly the number of words on a
@@ -134,6 +141,10 @@ VoiceTracker::VoiceTracker(QObject *parent)
             d->confidence = result.confidence;
             d->lastConfident = result.confident;
             d->lastTokensPerSec = result.estimatedTokensPerSec;
+            qCDebug(lcVoiceTracking)
+                << "aligned: offset" << result.charOffset
+                << "confidence" << result.confidence
+                << (result.confident ? "confident" : "coasting");
             emit trackingUpdated(static_cast<int>(result.charOffset),
                                  result.confidence);
         }, Qt::QueuedConnection);
@@ -305,9 +316,14 @@ void VoiceTracker::start()
     if (d->active)
         return;
 
+    qCDebug(lcVoiceTracking) << "start requested; language" << d->language
+                             << "model" << d->modelPath
+                             << "script tokens" << d->script.tokenCount();
+
     if (!modelAvailable()) {
         d->errorString = tr("No speech model found. Voice tracking needs a "
                             "whisper model to recognise speech.");
+        qCWarning(lcVoiceTracking) << "no speech model at" << d->modelPath;
         emit errorOccurred(d->errorString);
         return;
     }
@@ -317,6 +333,7 @@ void VoiceTracker::start()
     if (AudioCapture::permission() == MicPermission::Denied) {
         d->errorString = tr("Microphone access is denied. Grant it in System "
                             "Settings > Privacy & Security > Microphone.");
+        qCWarning(lcVoiceTracking) << "microphone permission denied";
         emit errorOccurred(d->errorString);
         return;
     }
@@ -327,6 +344,7 @@ void VoiceTracker::start()
     if (!d->recognizer.loadModel(config)) {
         d->errorString = tr("Could not load the speech model: %1")
                              .arg(QString::fromStdString(d->recognizer.lastError()));
+        qCWarning(lcVoiceTracking) << "model load failed:" << d->errorString;
         emit errorOccurred(d->errorString);
         return;
     }
@@ -341,12 +359,14 @@ void VoiceTracker::start()
     if (!d->recognizer.startLive(d->capture)) {
         d->errorString = tr("Could not start listening: %1")
                              .arg(QString::fromStdString(d->recognizer.lastError()));
+        qCWarning(lcVoiceTracking) << "startLive failed:" << d->errorString;
         emit errorOccurred(d->errorString);
         return;
     }
 
     d->errorString.clear();
     d->active = true;
+    qCDebug(lcVoiceTracking) << "listening";
     emit activeChanged();
 #endif
 }
