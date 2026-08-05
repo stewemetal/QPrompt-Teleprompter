@@ -27,6 +27,7 @@
 #include <QtWidgets>
 #endif
 #include <QDebug>
+#include <QDir>
 #include <QFontDatabase>
 #include <QIcon>
 #include <QQmlApplicationEngine>
@@ -311,7 +312,40 @@ KirigamiPlugin::getInstance().registerTypes();
         engine.rootContext()->setContextProperty(QStringLiteral("fileToOpen"), fileToOpen);
 #if defined(Q_OS_MACOS)
     // engine.addImportPath(QStringLiteral("/opt/homebrew/lib/qml"));
-    engine.addImportPath(QStringLiteral("/opt/homebrew/Cellar/kf5-kirigami2/5.95.0/lib/qt6/qml"));
+    // The bundled KDE QML modules (Kirigami, KCoreAddons) are built as shared
+    // libraries whose plugin dylibs live on disk next to the executable, but
+    // libKirigami also carries a copy of their qmldir files inside its own qrc.
+    // That qrc copy names `plugin Kirigamiplugin`, and the engine then looks for
+    // that dylib *inside* the qrc, where a binary cannot exist:
+    //
+    //     module "org.kde.kirigami" plugin "Kirigamiplugin" not found
+    //
+    // The engine only reaches the on-disk copy if these directories are in the
+    // import path, and the relative entries above are resolved against the
+    // WORKING directory, so they only happen to work when the app is launched
+    // from the right place -- which Finder and `open` never guarantee. Resolve
+    // them against the executable instead, and put them at the front of the
+    // list so the module is found without depending on the qrc lookup failing
+    // first.
+    {
+        const QDir appDir(QCoreApplication::applicationDirPath());
+        const QStringList preferredPaths{
+            // Installed bundle: Contents/MacOS/QPrompt -> Contents/Resources/qml
+            appDir.absoluteFilePath(QStringLiteral("../Resources/qml")),
+            // Installed bundle, alternate layout: Contents/MacOS/qml
+            appDir.absoluteFilePath(QStringLiteral("qml")),
+            // Build tree: build/bin/QPrompt.app/Contents/MacOS -> build/bin
+            appDir.absoluteFilePath(QStringLiteral("../../..")),
+        };
+        QStringList importPaths;
+        for (const QString &path : preferredPaths) {
+            if (QDir(path).exists())
+                importPaths.append(QDir::cleanPath(path));
+        }
+        importPaths.append(engine.importPathList());
+        importPaths.removeDuplicates();
+        engine.setImportPathList(importPaths);
+    }
 #endif
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
     engine.load(QUrl(u"qrc:/qt/qml/com/cuperino/qprompt/kirigami_ui/main.qml"_s));

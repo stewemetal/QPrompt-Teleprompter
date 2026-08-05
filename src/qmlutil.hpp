@@ -39,6 +39,7 @@
 #include <QSettings>
 #include <QByteArray>
 #include <QCryptographicHash>
+#include <QPointer>
 #include <QQuickItemGrabResult>
 #include <QFileInfo>
 #include <QUrl>
@@ -172,13 +173,20 @@ public:
         return QFileInfo::exists(path);
     }
 
+    // Holds each grab result alive for one extra frame so the projection
+    // windows can still read its url() after the callback returns, then drops
+    // it. The results are created by grabToImage() and owned by the QML engine,
+    // so they can be collected at any time once JavaScript no longer holds a
+    // reference. Guard them with QPointer: a raw pointer dangles the moment the
+    // engine collects one, and the deleteLater() below then writes through it
+    // and segfaults on the very first frame swap when projections are enabled.
     Q_INVOKABLE void r(QQuickItemGrabResult *res) {
-        if (m_frame[m_bufferIndex] != nullptr)
+        if (!m_frame[m_bufferIndex].isNull())
             m_frame[m_bufferIndex]->deleteLater();
         m_bufferIndex = (m_bufferIndex + 1) % 2;
         m_frame[m_bufferIndex] = res;
     }
 private:
     int m_bufferIndex = 0;
-    QQuickItemGrabResult *m_frame[2] = { nullptr };
+    QPointer<QQuickItemGrabResult> m_frame[2];
 };
