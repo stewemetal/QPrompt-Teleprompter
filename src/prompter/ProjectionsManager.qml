@@ -105,23 +105,33 @@ Item {
         var flip = this.defaultDisplayMode;
         const totalDisplays = displayModel.count;
         for (var i=0; i<Qt.application.screens.length; i++) {
+            const targetScreen = Qt.application.screens[i];
             for (var j=0; j<totalDisplays; j++)
-                if (Qt.application.screens[i].name===displayModel.get(j).name) {
+                if (targetScreen.name===displayModel.get(j).name) {
                     flip = displayModel.get(j).flipSetting;
                     break;
                 }
                 else
                     flip = this.defaultDisplayMode;
             // Comment the following line to debug with a single screen.
-            if (flip>0 /*&& Qt.application.screens[i].name!==screen.name*/)
+            if (flip>0 /*&& targetScreen.name!==screen.name*/)
+                // Size each projection to its own screen, not to the whole virtual
+                // desktop. Screen.desktopAvailableWidth/Height describe the bounding
+                // box of all screens combined (they notify on desktopGeometryChanged),
+                // so using them made every projection window as wide as the entire
+                // desktop. Positioned at one screen's origin, such a window overlaps
+                // the neighbouring display more than its target, and the window
+                // manager then hands it to that neighbour, overriding the "screen"
+                // property below. On macOS this always landed projections on the
+                // built-in display. Screen.width/height are the per-screen values.
                 projectionModel.append ({
                     "id": i,
-                    "screen": Qt.application.screens[i],
-                    "name": Qt.application.screens[i].name, // + ' ' + Qt.application.screens[i].model + ' ' + Qt.application.screens[i].manufacturer,
-                    "x": Qt.application.screens[i].virtualX,
-                    "y": Qt.application.screens[i].virtualY,
-                    "width": Qt.application.screens[i].desktopAvailableWidth,
-                    "height": Qt.application.screens[i].desktopAvailableHeight,
+                    "screen": targetScreen,
+                    "name": targetScreen.name, // + ' ' + targetScreen.model + ' ' + targetScreen.manufacturer,
+                    "x": targetScreen.virtualX,
+                    "y": targetScreen.virtualY,
+                    "width": targetScreen.width,
+                    "height": targetScreen.height,
                     "flip": flip,//.projectionSetting,
                     "p": ""
                 });
