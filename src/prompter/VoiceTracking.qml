@@ -136,15 +136,16 @@ QtObject {
     // text: left running, the constant-speed scroll drifts on through every
     // pause and the two sources fight over the same position.
     //
-    // Tell the prompter that something else is driving the scroll, so it stops
-    // arming its own timed ride to the end of the document. Without this the
-    // constant-speed scroll keeps carrying the view through every pause and the
-    // two sources fight over the same position. Clearing it hands the user's own
-    // speed straight back -- __i was never touched.
-    property Binding __ownScroll: Binding {
+    // Take over as the prompter's scroll driver while listening, and hand it
+    // back the moment we stop. Selecting Voice suspends the timed ride; without
+    // that the constant-speed scroll keeps carrying the view through every pause
+    // and the two sources fight over the same position. Returning to Timed gives
+    // the user's own speed straight back -- __i was never touched.
+    property Binding __scrollDriver: Binding {
         target: prompter
-        property: "scrollDrivenExternally"
-        value: voiceTracking.active
+        property: "scrollDriver"
+        value: voiceTracking.active ? Prompter.ScrollDrivers.Voice
+                                    : Prompter.ScrollDrivers.Timed
         restoreMode: Binding.RestoreBindingOrValue
     }
 

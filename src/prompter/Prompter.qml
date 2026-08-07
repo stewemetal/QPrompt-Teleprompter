@@ -106,6 +106,21 @@ Flickable {
         Exit,
         Loop
     }
+    // What decides where the text should be.
+    //
+    // Timed is the prompter's own constant-speed ride: the user picks a speed
+    // and the view runs to the end of the document on a single long animation.
+    // Voice hands that decision to speech alignment, which reports where the
+    // speaker actually is, and the view is moved there instead.
+    //
+    // These are mutually exclusive by construction. Two sources writing the
+    // same position fight each other -- the timed ride drifts on through every
+    // pause while the follower keeps pulling back -- so exactly one drives at a
+    // time, and the properties that turn __i into motion consult this.
+    enum ScrollDrivers {
+        Timed,
+        Voice
+    }
     readonly property real editorXWidth: Math.abs(editor.x)/prompter.width
     readonly property real editorXOffset: positionHandler.x/prompter.width
     readonly property real centreX: width / 2;
@@ -120,23 +135,24 @@ Flickable {
     readonly property real __relativeSpeed: (__speed * fontSize/2 * ((__vw-__evw/2) / __vw)) // Adjust relative to viewport widths and font size.
     readonly property real __travelDistance: position + topMargin - __jitterMargin
     readonly property real __timeToEnd: 2 * (editor.height + fontSize - __travelDistance) / __relativeSpeed // In seconds, used for Timer.
-    // True while something else owns the scroll position -- currently voice
-    // tracking, which moves the view to wherever the speaker actually is.
-    //
-    // The timed scroll works by riding a single long animation to the far end of
-    // the document, so it cannot simply be paused from outside: every velocity
+    // Which strategy is currently deciding the scroll position. Defaults to the
+    // prompter's own timed scroll, so a build with no other driver behaves
+    // exactly as it always has.
+    property int scrollDriver: Prompter.ScrollDrivers.Timed
+    readonly property bool __timedScroll: scrollDriver === Prompter.ScrollDrivers.Timed
+
+    // The timed ride cannot simply be paused from outside: every velocity
     // control writes __i imperatively (toggle(), setVelocity(), the velocity
-    // keys), and any Binding placed on __i from another component is clobbered
-    // by the next such write. Gating the two properties that turn __i into
-    // motion is the one place that covers all of them: with no destination and
-    // no duration, the ride is never armed, whoever set __i and whenever.
+    // keys), so a Binding placed on __i by another component is clobbered by the
+    // next such write. Gating the two properties that turn __i into motion is
+    // the one place that covers all of them -- with no destination and no
+    // duration the ride is never armed, whoever set __i and whenever.
     //
     // __i itself is deliberately left alone, so the user's chosen speed is
-    // remembered and takes effect again the moment this clears.
-    property bool scrollDrivenExternally: false
-    readonly property real __timeToArival: (__i && !scrollDrivenExternally) ? ((__possitiveDirection ? __timeToEnd : 2 * __travelDistance / __relativeSpeed)) * 1000 : 0 // In milliseconds, used for animation.
+    // remembered and takes effect again the moment Timed resumes.
+    readonly property real __timeToArival: (__i && __timedScroll) ? ((__possitiveDirection ? __timeToEnd : 2 * __travelDistance / __relativeSpeed)) * 1000 : 0 // In milliseconds, used for animation.
     property real timeToArival: __timeToArival
-    readonly property int __destination: (__i && !scrollDrivenExternally) ? (__possitiveDirection ? editor.height+fontSize-__jitterMargin : __jitterMargin)-topMargin : position
+    readonly property int __destination: (__i && __timedScroll) ? (__possitiveDirection ? editor.height+fontSize-__jitterMargin : __jitterMargin)-topMargin : position
     // At start and at end rules
     readonly property bool __atStart: position<=__jitterMargin-topMargin+2
     readonly property bool __atEnd: position>=editor.height-topMargin+fontSize+__jitterMargin-2
