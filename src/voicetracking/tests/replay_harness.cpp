@@ -24,7 +24,6 @@
 #include "../aligner.h"
 #include "../audiocapture.h"
 #include "../scriptmodel.h"
-#include "../scrollcontroller.h"
 #include "../speechrecognizer.h"
 #include "../textnormalize.h"
 
@@ -145,11 +144,6 @@ int main(int argc, char **argv)
     Aligner aligner;
     aligner.setScript(script);
 
-    ScrollController controller;
-    controller.setLineHeight(kLineHeightPx);
-    // A plausible constant speed to fall back to, so coasting is observable.
-    controller.setFallbackVelocity(kPxPerToken * 2.6);
-
     SpeechRecognizer recognizer;
     SpeechRecognizer::Config config;
     config.modelPath = options.modelPath;
@@ -164,8 +158,8 @@ int main(int argc, char **argv)
     std::printf("audio:    %s\n", options.audioPath.c_str());
     std::printf("language: %s\n\n", options.language.c_str());
 
-    // Simulated view state. The scroll position integrates the commanded
-    // velocity, which is what the real prompter's animation does.
+    // Simulated view state. The prompter is moved TO the matched line and holds
+    // there until the next confident match, which is what the live path does.
     double positionPx = 0.0;
     double lastClockSec = 0.0;
 
@@ -174,8 +168,8 @@ int main(int argc, char **argv)
     size_t maxTokenIndex = 0;
     size_t backwardJumps = 0;
     size_t lastTokenIndex = 0;
-    double maxVelocity = 0.0;
-    bool sawNegativeVelocity = false;
+    double maxStepPx = 0.0;
+    bool sawBackwardScroll = false;
     bool sawNonFinite = false;
 
     recognizer.setObservationCallback([&](const Observation &observation) {
@@ -183,31 +177,25 @@ int main(int argc, char **argv)
 
         const AlignResult result = aligner.update(observation);
 
-        // Advance the simulated clock to this observation's audio time, so the
-        // control loop sees the same dt the live path would.
         const double nowSec = observation.audioTimeSec;
-        const double dt = std::max(0.0, nowSec - lastClockSec);
         lastClockSec = nowSec;
 
         // Where the matched token sits, in pixels.
         const double targetPx =
             static_cast<double>(result.tokenIndex) * kPxPerToken;
 
-        const ScrollCommand command =
-            controller.update(result.confident,
-                              targetPx,
-                              positionPx,
-                              result.estimatedTokensPerSec * kPxPerToken,
-                              nowSec);
+        // Follow: a trusted match moves the view to that line, anything else
+        // leaves it exactly where it is. This mirrors VoiceTracking.qml.
+        if (result.confident) {
+            const double step = targetPx - positionPx;
+            if (step < 0.0)
+                sawBackwardScroll = true;
+            maxStepPx = std::max(maxStepPx, std::abs(step));
+            positionPx = targetPx;
+        }
 
-        // Integrate, exactly as the view's animation would.
-        positionPx += command.velocityPxPerSec * dt;
-
-        if (!std::isfinite(command.velocityPxPerSec) || !std::isfinite(positionPx))
+        if (!std::isfinite(positionPx))
             sawNonFinite = true;
-        if (command.velocityPxPerSec < 0.0)
-            sawNegativeVelocity = true;
-        maxVelocity = std::max(maxVelocity, command.velocityPxPerSec);
 
         if (result.confident) {
             ++confidentCount;
@@ -218,13 +206,12 @@ int main(int argc, char **argv)
         }
 
         if (options.verbose) {
-            std::printf("t=%6.2f %-8s tok=%4zu conf=%.2f %-8s v=%7.1f px/s  pos=%8.1f\n",
+            std::printf("t=%6.2f %-8s tok=%4zu conf=%.2f %-8s pos=%8.1f\n",
                         observation.audioTimeSec,
                         observation.isVolatile ? "volatile" : "FINAL",
                         result.tokenIndex,
                         result.confidence,
-                        result.confident ? "TRACK" : "coast",
-                        command.velocityPxPerSec,
+                        result.confident ? "TRACK" : "hold",
                         positionPx);
         }
     });
@@ -253,7 +240,7 @@ int main(int argc, char **argv)
     std::printf("furthest token:    %zu / %zu (%.0f%% of script)\n",
                 maxTokenIndex, script.tokenCount(), progress * 100.0);
     std::printf("backward jumps:    %zu\n", backwardJumps);
-    std::printf("peak velocity:     %.1f px/s\n", maxVelocity);
+    std::printf("largest jump:      %.1f px\n", maxStepPx);
     std::printf("final position:    %.1f px\n", positionPx);
     std::printf("last transcript:   %s\n", recognizer.lastTranscript().c_str());
 
@@ -271,7 +258,7 @@ int main(int argc, char **argv)
     std::printf("\n=== checks ===\n");
     require(observations > 0, "produced observations");
     require(!sawNonFinite, "no non-finite velocity or position");
-    require(!sawNegativeVelocity, "never scrolled backwards");
+    require(!sawBackwardScroll, "never scrolled backwards");
     require(backwardJumps == 0, "no confident backward jumps");
     require(progress >= options.expectProgress,
             "advanced through the expected share of script");

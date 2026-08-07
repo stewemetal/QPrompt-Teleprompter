@@ -22,11 +22,11 @@
 // QML-facing front end for voice tracking.
 //
 // This is the only file in the feature that knows about Qt. It owns the
-// microphone, the recognizer and the aligner, and publishes a scroll velocity
-// that Prompter.qml binds to. The alignment and control logic live in
-// voicetracking/ as plain C++17 so they can be tested without a GUI; this class
-// is the adapter between the two worlds and deliberately holds no algorithm of
-// its own.
+// microphone, the recognizer and the aligner, and reports WHERE IN THE SCRIPT
+// the speaker is; QML turns that character offset into a scroll position and
+// moves the view there. The alignment logic lives in voicetracking/ as plain
+// C++17 so it can be tested without a GUI; this class is the adapter between the
+// two worlds and deliberately holds no algorithm of its own.
 //
 // Threading: audio capture and whisper inference run on their own threads. All
 // signals reach QML on the GUI thread via queued connections, so QML only ever
@@ -48,7 +48,6 @@
 #ifdef QPROMPT_VOICE_TRACKING
 #include "voicetracking/aligner.h"
 #include "voicetracking/scriptmodel.h"
-#include "voicetracking/scrollcontroller.h"
 #endif
 
 class VoiceTrackerPrivate;
@@ -75,9 +74,9 @@ class VoiceTracker : public QObject
     Q_PROPERTY(QString modelPath READ modelPath WRITE setModelPath NOTIFY modelPathChanged)
     Q_PROPERTY(bool modelAvailable READ modelAvailable NOTIFY modelPathChanged)
 
-    // True while running on the fallback rate because alignment is not
-    // trusted. Drives a UI indicator so the reader can see that the prompter
-    // has lost them, rather than wondering why it feels wrong.
+    // True while the aligner does not trust its fix, so the view holds still
+    // instead of following. Drives a UI indicator, so the reader can see that
+    // the prompter has lost them rather than wondering why it feels wrong.
     Q_PROPERTY(bool coasting READ isCoasting NOTIFY coastingChanged)
 
     // Posterior confidence in [0, 1], for diagnostics and a UI meter.
@@ -116,42 +115,12 @@ public slots:
     // Stops capture and recognition. Safe to call when not running.
     void stop();
 
-    // Geometry the controller needs, pushed from QML because only the view
-    // knows it.
-    void setLineHeight(double px);
-    void setFallbackVelocity(double pxPerSec);
-
-    // How many script tokens fit on one rendered line. QML owns the font
-    // metrics and wrap width, so only it can measure this. Used to convert the
-    // aligner's tokens/second into pixels/second.
-    void setTokensPerLine(double tokens);
-
-    // Current scroll position, pushed each time QML asks for a velocity.
-    void setCurrentPosition(double pixel);
-
-    // Runs one control step and emits a new velocity.
-    //
-    // Split from alignment on purpose: the aligner reports a CHARACTER OFFSET,
-    // but the controller needs a PIXEL target, and only QML can map between
-    // them because the mapping lives in the text document's layout. So QML
-    // receives trackingUpdated(offset), resolves the offset to a y coordinate,
-    // and calls this with the result.
-    void applyTarget(double targetPixel, double currentPixel);
-
     // The user scrolled or jumped: adopt that position instead of fighting it.
     void reanchor(double pixel, int characterOffset);
 
 signals:
-    // A new scroll velocity is available, in pixels per second. Prompter.qml
-    // applies this to its animation.
-    void velocityChanged(double pixelsPerSecond);
-
-    // An immediate, non-animated seek is wanted. Only emitted after an explicit
-    // re-anchor; routine corrections never seek.
-    void seekRequested(double pixel);
-
     // Alignment moved. characterOffset indexes the script passed to
-    // setScript(); QML maps it to a y position.
+    // setScript(); QML maps it to a scroll position and moves there.
     void trackingUpdated(int characterOffset, double confidence);
 
     void activeChanged();

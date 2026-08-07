@@ -111,7 +111,6 @@ if(QPROMPT_VOICE_TRACKING_ENABLED)
         voicetracking/textnormalize.h voicetracking/textnormalize.cpp
         voicetracking/scriptmodel.h voicetracking/scriptmodel.cpp
         voicetracking/aligner.h voicetracking/aligner.cpp
-        voicetracking/scrollcontroller.h voicetracking/scrollcontroller.cpp
         voicetracking/speechrecognizer.h voicetracking/speechrecognizer.cpp
         voicetracking/audiocapture.h voicetracking/audiocapture.mm
         voicetracker.h voicetracker.cpp
@@ -672,26 +671,6 @@ if(QPROMPT_VOICE_TRACKING_ENABLED AND QPROMPT_VOICE_TRACKING_TESTS)
     add_test(NAME voicetracking_alignment
              COMMAND qprompt_voicetracking_tests)
 
-    # Control law. Separate binary from the aligner tests so a failure names
-    # which half broke without having to read the output.
-    add_executable(qprompt_scrollcontroller_tests
-        voicetracking/scrollcontroller.cpp
-        voicetracking/tests/scrollcontroller_tests.cpp
-    )
-    set_target_properties(qprompt_scrollcontroller_tests PROPERTIES
-        AUTOMOC OFF
-        AUTOUIC OFF
-        AUTORCC OFF
-        CXX_STANDARD 17
-        CXX_STANDARD_REQUIRED ON
-        MACOSX_BUNDLE FALSE
-        WIN32_EXECUTABLE FALSE
-    )
-    target_include_directories(qprompt_scrollcontroller_tests
-        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    add_test(NAME voicetracking_control
-             COMMAND qprompt_scrollcontroller_tests)
-
     # Audio capture and the whisper driver. Needs whisper and the macOS audio
     # frameworks, so unlike the two above it is not pure C++17.
     add_executable(qprompt_speechrecognizer_tests
@@ -734,7 +713,6 @@ if(QPROMPT_VOICE_TRACKING_ENABLED AND QPROMPT_VOICE_TRACKING_TESTS)
         voicetracking/textnormalize.cpp
         voicetracking/scriptmodel.cpp
         voicetracking/aligner.cpp
-        voicetracking/scrollcontroller.cpp
         voicetracking/audiocapture.mm
         voicetracking/speechrecognizer.cpp
         voicetracking/tests/replay_harness.cpp

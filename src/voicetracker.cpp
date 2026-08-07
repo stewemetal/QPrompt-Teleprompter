@@ -21,7 +21,6 @@
 
 #include "voicetracker.h"
 
-#include <QElapsedTimer>
 #include <QFileInfo>
 #include <QLoggingCategory>
 #include <QStandardPaths>
@@ -42,13 +41,6 @@ using namespace qprompt::voicetracking;
 // text in a menu, which is impossible to inspect from a terminal or a log file.
 Q_LOGGING_CATEGORY(lcVoiceTracking, "qprompt.voicetracking")
 
-namespace {
-// Used only until QML reports real metrics. Roughly the number of words on a
-// teleprompter line at a typical font size and wrap width; wrong by a factor of
-// two costs some feed-forward accuracy, which the proportional term absorbs.
-constexpr double kFallbackTokensPerLine = 7.0;
-} // namespace
-
 // ---------------------------------------------------------------------------
 // Private
 // ---------------------------------------------------------------------------
@@ -68,33 +60,18 @@ public:
     SpeechRecognizer recognizer;
     ScriptModel script;
     Aligner aligner;
-    ScrollController controller;
 
     // The script text whose character offsets the aligner reports. Held so the
     // adapter can validate offsets before handing them to QML.
     std::string scriptText;
 
-    // Guards the aligner and controller, which are touched from the inference
-    // thread (on each observation) and from the GUI thread (geometry updates,
-    // re-anchors).
+    // Guards the aligner, which is touched from the inference thread (on each
+    // observation) and from the GUI thread (re-anchors).
     std::mutex mutex;
 
-    // Monotonic clock for the control loop. Wall-clock time would let a system
-    // clock change produce an absurd dt.
-    QElapsedTimer clock;
-
-    double currentPosition = 0.0;
-    double lineHeight = 24.0;
-    double fallbackVelocity = 0.0;
-
-    // Last alignment result, kept so the control step can run when QML supplies
-    // the pixel target that corresponds to the reported character offset.
+    // Last alignment result. Kept for the UI-facing properties.
     bool lastConfident = false;
     double lastTokensPerSec = 0.0;
-
-    // How many script tokens occupy one rendered line. Supplied by QML, which
-    // is the only side that knows the font metrics and wrap width.
-    double tokensPerLine = 0.0;
 #endif
 };
 
@@ -105,8 +82,6 @@ VoiceTracker::VoiceTracker(QObject *parent)
     , d(std::make_unique<VoiceTrackerPrivate>())
 {
 #ifdef QPROMPT_VOICE_TRACKING
-    d->clock.start();
-
     // Look for a model in the usual per-user data location. Not fatal when
     // absent: `modelAvailable` stays false and QML can offer to fetch one,
     // which is better than starting and failing at the first window.
@@ -122,14 +97,11 @@ VoiceTracker::VoiceTracker(QObject *parent)
         }
     }
 
-    // Observations arrive on the inference thread. Everything below runs there,
-    // so it must not touch QObject state directly; results reach the GUI thread
-    // through a queued emit.
-    // Observations arrive on the inference thread. Alignment happens there;
-    // the control step does NOT, because it needs a target in pixels and only
-    // QML can turn a character offset into a y coordinate (via the text
-    // document's layout). So this callback aligns, then hands the offset to the
-    // GUI thread, which resolves it to a pixel and calls applyTarget().
+    // Observations arrive on the inference thread, so this must not touch
+    // QObject state directly: it aligns there, then hands the resulting
+    // character offset to the GUI thread through a queued emit. QML resolves
+    // that offset to a scroll position, because only it can -- the mapping
+    // lives in the text document's layout.
     d->recognizer.setObservationCallback([this](const Observation &observation) {
         AlignResult result;
         {
@@ -218,101 +190,15 @@ void VoiceTracker::setScript(const QString &plainText)
 #endif
 }
 
-void VoiceTracker::setLineHeight(double px)
-{
-#ifdef QPROMPT_VOICE_TRACKING
-    std::lock_guard<std::mutex> lock(d->mutex);
-    d->lineHeight = px > 0.0 ? px : 24.0;
-    d->controller.setLineHeight(d->lineHeight);
-#else
-    Q_UNUSED(px)
-#endif
-}
-
-void VoiceTracker::setFallbackVelocity(double pxPerSec)
-{
-#ifdef QPROMPT_VOICE_TRACKING
-    std::lock_guard<std::mutex> lock(d->mutex);
-    d->fallbackVelocity = pxPerSec;
-    d->controller.setFallbackVelocity(pxPerSec);
-#else
-    Q_UNUSED(pxPerSec)
-#endif
-}
-
-void VoiceTracker::setCurrentPosition(double pixel)
-{
-#ifdef QPROMPT_VOICE_TRACKING
-    std::lock_guard<std::mutex> lock(d->mutex);
-    d->currentPosition = pixel;
-#else
-    Q_UNUSED(pixel)
-#endif
-}
-
-void VoiceTracker::applyTarget(double targetPixel, double currentPixel)
-{
-#ifdef QPROMPT_VOICE_TRACKING
-    ScrollCommand command;
-    bool coastingChangedNow = false;
-    {
-        std::lock_guard<std::mutex> lock(d->mutex);
-        d->currentPosition = currentPixel;
-
-        // The aligner counts script TOKENS; the view moves PIXELS. Converting
-        // between them needs the rendered size of a token, which is a view
-        // property. Derive it from the distance the text has to travel per
-        // token rather than assuming a fixed words-per-line: pixels per token
-        // is the line height divided by however many tokens fit on a line.
-        const double tokensPerLine = d->tokensPerLine > 0.0 ? d->tokensPerLine
-                                                            : kFallbackTokensPerLine;
-        const double pxPerToken = d->lineHeight / tokensPerLine;
-        const double speechPxPerSec = d->lastTokensPerSec * pxPerToken;
-
-        command = d->controller.update(d->lastConfident,
-                                       targetPixel,
-                                       currentPixel,
-                                       speechPxPerSec,
-                                       d->clock.elapsed() / 1000.0);
-
-        if (d->coasting != command.coasting) {
-            d->coasting = command.coasting;
-            coastingChangedNow = true;
-        }
-    }
-
-    if (coastingChangedNow)
-        emit coastingChanged();
-    if (command.seek)
-        emit seekRequested(command.seekToPixel);
-    emit velocityChanged(command.velocityPxPerSec);
-#else
-    Q_UNUSED(targetPixel)
-    Q_UNUSED(currentPixel)
-#endif
-}
-
-void VoiceTracker::setTokensPerLine(double tokens)
-{
-#ifdef QPROMPT_VOICE_TRACKING
-    std::lock_guard<std::mutex> lock(d->mutex);
-    d->tokensPerLine = tokens;
-#else
-    Q_UNUSED(tokens)
-#endif
-}
-
 void VoiceTracker::reanchor(double pixel, int characterOffset)
 {
 #ifdef QPROMPT_VOICE_TRACKING
-    ScrollCommand command;
-    {
-        std::lock_guard<std::mutex> lock(d->mutex);
-        d->aligner.reanchor(static_cast<size_t>(std::max(0, characterOffset)));
-        d->currentPosition = pixel;
-        command = d->controller.reanchor(pixel, d->clock.elapsed() / 1000.0);
-    }
-    emit velocityChanged(command.velocityPxPerSec);
+    // The pixel is the view's business, not ours: QML has already moved there.
+    // All this needs to do is tell the aligner to believe it, so the next match
+    // is scored from the new position instead of the abandoned one.
+    Q_UNUSED(pixel)
+    std::lock_guard<std::mutex> lock(d->mutex);
+    d->aligner.reanchor(static_cast<size_t>(std::max(0, characterOffset)));
 #else
     Q_UNUSED(pixel)
     Q_UNUSED(characterOffset)
@@ -360,7 +246,6 @@ void VoiceTracker::start()
 
     {
         std::lock_guard<std::mutex> lock(d->mutex);
-        d->controller.reset();
         d->aligner.reset();
         d->aligner.setScript(d->script);
     }
