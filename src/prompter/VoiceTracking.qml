@@ -23,25 +23,26 @@
 //
 // HOW THIS DRIVES THE PROMPTER
 // ----------------------------
-// The prompter does not run a per-frame scroll loop. It assigns
-// `position = __destination` -- the far end of the document -- and lets a
-// single Linear NumberAnimation carry contentY there over minutes. Speed is
-// therefore expressed as the animation's DURATION, not as a velocity.
+// The recognizer says WHICH WORDS were heard; the aligner says WHERE in the
+// script those words are. That is a position, not a speed -- so this drives the
+// prompter the same way every other "go to a place in the script" feature does:
+// by moving to that position and letting the prompter animate the rest.
 //
-// That is why this file converts px/sec into a duration rather than writing a
-// velocity anywhere:
+// `scrollToOffset()` is the seam (Prompter.qml). It is what markers, search
+// results and manual navigation already use: set the cursor, read back the
+// y coordinate of that line, and assign `position`, which the existing
+// `Behavior on position` animates smoothly. Voice tracking is therefore just
+// another caller of a path the prompter already understands, rather than a
+// second, parallel scroll driver.
 //
-//     duration_ms = remaining_pixels / velocity_px_per_sec * 1000
-//
-// `timeToArival` is declared non-readonly in Prompter.qml precisely so it can
-// be overridden this way. Writing to it breaks its binding to __timeToArival,
-// which is intended here: while tracking, this component owns the scroll rate.
-// restoreBinding() puts the original binding back when tracking stops.
-//
-// The alternative -- driving the integer speed step __i -- was rejected: __i is
-// an integer mapped through a power curve, so at low speeds a single step
-// nearly doubles the rate. That quantisation is far too coarse for smooth
-// tracking.
+// An earlier design instead overrode the scroll RATE -- computing a velocity
+// from the alignment error and expressing it as the animation's duration. It
+// worked, but only by fighting the scroll engine: forcing `__i` non-zero so a
+// destination existed, respecting the `__jitterMargin`/`__tikTok` parity hack
+// to make writes re-fire, breaking and restoring the `timeToArival` binding,
+// and adding a seek-on-start state machine to escape the case where the view
+// had already run past the speaker. All of that disappears when the alignment
+// is treated as a position.
 
 import QtQuick
 import com.cuperino.qprompt
@@ -66,34 +67,33 @@ QtObject {
     property alias modelPath: tracker.modelPath
     readonly property bool modelAvailable: tracker.modelAvailable
 
-    // True once we have taken over the prompter's scroll rate, so we know
-    // whether there is a binding to restore.
-    property bool __drivingScroll: false
+    // Ignore a match that would move the view less than this. Alignment jitters
+    // by a few pixels between updates even while the speaker holds still, and
+    // re-targeting on that jitter restarts the animation constantly, which reads
+    // as a shimmer rather than a scroll.
+    readonly property int __deadbandPx: 8
 
-    // Last velocity received, in px/sec.
-    property double __velocity: 0
+    // How long a follow move takes. Roughly one recogniser hop, so consecutive
+    // matches join into continuous motion instead of a series of visible jumps.
+    readonly property int __followMs: 500
 
     readonly property VoiceTracker __tracker: VoiceTracker {
         id: tracker
 
-        onVelocityChanged: function (pixelsPerSecond) {
-            voiceTracking.__velocity = pixelsPerSecond;
-            voiceTracking.__applyVelocity(pixelsPerSecond);
-        }
-
-        onSeekRequested: function (pixel) {
-            voiceTracking.__seekTo(pixel);
-        }
-
-        // The aligner reports WHERE IN THE TEXT the speaker is; the controller
-        // needs a y coordinate. Only this side can do that mapping, because it
-        // lives in the text document's layout. Resolve the offset here and hand
-        // the pixel target back, which is what runs the control step.
+        // Alignment moved. This is the whole integration: resolve the character
+        // offset the aligner reported to a scroll position, and go there.
+        //
+        // Only confident matches move the view. When the aligner is unsure --
+        // the speaker ad-libbed, went quiet, or the audio was noisy -- the right
+        // behaviour is to leave the prompter exactly where it is. Guessing would
+        // send the reader somewhere they are not, which is far worse than
+        // briefly not following.
         onTrackingUpdated: function (characterOffset, confidence) {
             if (!voiceTracking.enabled || !prompter || !editor)
                 return;
-            tracker.applyTarget(voiceTracking.__pixelForOffset(characterOffset),
-                                prompter.position);
+            if (voiceTracking.coasting)
+                return;
+            voiceTracking.__followTo(characterOffset);
         }
 
         onErrorOccurred: function (message) {
@@ -102,20 +102,12 @@ QtObject {
         }
     }
 
-    // Pushes the script and the view geometry the controller needs. Cheap
-    // enough to call whenever the document or font changes.
+    // Pushes the script to the recognizer. Cheap enough to call whenever the
+    // document changes.
     function refresh() {
         if (!prompter || !editor)
             return;
         tracker.setScript(editor.getText(0, editor.length));
-        tracker.setLineHeight(editor.cursorRectangle.height > 0
-                              ? editor.cursorRectangle.height
-                              : prompter.fontSize);
-        // The prompter's own constant speed, in px/sec, so that losing
-        // alignment blends back to the speed the user chose rather than to an
-        // arbitrary default. __relativeSpeed is px/sec doubled -- see
-        // __timeToEnd in Prompter.qml, which divides a doubled distance by it.
-        tracker.setFallbackVelocity(prompter.__relativeSpeed / 2);
     }
 
     function start() {
@@ -127,102 +119,47 @@ QtObject {
 
     function stop() {
         tracker.stop();
-        __restoreScrollBinding();
     }
 
-    // Character offset -> scroll position, so the matched word sits in the read
-    // region.
+    // Hold the timed scroll at a standstill for as long as tracking is running.
     //
-    // This is the same conversion Prompter.qml's goTo() performs: move the
-    // cursor, read back cursorRectangle.y, and subtract the read-region offset
-    // (which is what topMargin holds). Reusing it keeps voice tracking aligned
-    // with markers and manual navigation instead of inventing a second, subtly
-    // different idea of where "the current line" is.
+    // While following a voice, the voice is the only thing that should move the
+    // text: left running, the constant-speed scroll drifts on through every
+    // pause and the two sources fight over the same position. A Binding rather
+    // than a one-off assignment because entering prompting mode sets __i itself,
+    // after this component has already started -- so the value has to be held,
+    // not just set once. Restoring the binding on `when` going false hands the
+    // user's own speed straight back.
+    // Hold the timed scroll at a standstill for as long as tracking is running.
     //
-    // Moving the cursor is a side effect, so this deliberately does NOT run
-    // while the user is editing -- see the guard in the caller.
-    function __pixelForOffset(characterOffset) {
-        if (!prompter || !editor)
-            return 0;
+    // While following a voice, the voice is the only thing that should move the
+    // text: left running, the constant-speed scroll drifts on through every
+    // pause and the two sources fight over the same position.
+    //
+    // Tell the prompter that something else is driving the scroll, so it stops
+    // arming its own timed ride to the end of the document. Without this the
+    // constant-speed scroll keeps carrying the view through every pause and the
+    // two sources fight over the same position. Clearing it hands the user's own
+    // speed straight back -- __i was never touched.
+    property Binding __ownScroll: Binding {
+        target: prompter
+        property: "scrollDrivenExternally"
+        value: voiceTracking.active
+        restoreMode: Binding.RestoreBindingOrValue
+    }
+
+    // Moves the prompter so the matched words sit in the read region.
+    //
+    // Deliberately delegates to the prompter rather than computing a position
+    // here: the prompter owns where the read region is and how the view eases
+    // there, and duplicating that would give voice tracking its own subtly
+    // different idea of where "the current line" sits.
+    function __followTo(characterOffset) {
         const clamped = Math.max(0, Math.min(characterOffset, editor.length));
-        const previous = editor.cursorPosition;
-        editor.cursorPosition = clamped;
-        const y = editor.cursorRectangle.y;
-        // Put the cursor back: leaving it parked on the tracked word would
-        // fight the user and move the visible caret around mid-read.
-        editor.cursorPosition = previous;
-        return y - prompter.topMargin + 1;
-    }
-
-    // Converts a velocity into the animation duration the prompter runs on.
-    function __applyVelocity(pixelsPerSecond) {
-        if (!prompter || !enabled || !prompter.__play)
+        const target = prompter.positionForCursor(clamped);
+        if (Math.abs(target - prompter.position) < __deadbandPx)
             return;
-
-        // Below this the duration explodes towards infinity; treat it as a
-        // stop and let the prompter's own logic hold position.
-        if (pixelsPerSecond <= 0.01) {
-            prompter.timeToArival = 0;
-            return;
-        }
-
-        const remaining = prompter.__destination - prompter.position;
-        if (Math.abs(remaining) < 1) {
-            return;
-        }
-
-        if (!__drivingScroll) {
-            __drivingScroll = true;
-        }
-
-        // Duration for the animation still heading to __destination.
-        prompter.timeToArival = Math.abs(remaining) / pixelsPerSecond * 1000;
-
-        // Re-arm the ride. Every speed change in Prompter.qml ends by
-        // re-assigning position to __destination, because the Behavior only
-        // re-fires when the destination value actually changes -- that is what
-        // the __jitterMargin/__tikTok parity hack exists for.
-        prompter.position = prompter.__destination;
-    }
-
-    // Immediate, non-animated move. Used only for explicit re-anchors.
-    function __seekTo(pixel) {
-        if (!prompter)
-            return;
-        // Suppress the Behavior so this lands instantly instead of animating
-        // over the current (possibly minutes-long) duration.
-        const wasEnabled = prompter.motion.enabled;
-        prompter.motion.enabled = false;
-        prompter.position = pixel;
-        prompter.motion.enabled = wasEnabled;
-        if (prompter.__play && prompter.__i !== 0)
-            prompter.position = prompter.__destination;
-    }
-
-    // Hands the scroll rate back to the prompter's own bindings.
-    function __restoreScrollBinding() {
-        if (!prompter || !__drivingScroll)
-            return;
-        prompter.timeToArival = Qt.binding(function () {
-            return prompter.__timeToArival;
-        });
-        __drivingScroll = false;
-        if (prompter.__play && prompter.__i !== 0)
-            prompter.position = prompter.__destination;
-    }
-
-    // Feeds the current scroll position back so the controller can measure its
-    // own error.
-    //
-    // Sampled on a timer rather than bound to contentY: the position changes
-    // every frame while scrolling, and the controller only needs it at the rate
-    // new alignment estimates arrive. A binding would push thousands of updates
-    // a second across the C++ boundary for no benefit.
-    property Timer __positionFeed: Timer {
-        interval: 100
-        repeat: true
-        running: voiceTracking.enabled && voiceTracking.active && prompter !== null
-        onTriggered: tracker.setCurrentPosition(prompter.position)
+        prompter.scrollToOffset(clamped, __followMs);
     }
 
     // A manual scroll or a marker jump means the user has told us where they
@@ -241,10 +178,8 @@ QtObject {
         if (!prompter || !editor)
             return;
         // Map the current scroll position back to a character offset the
-        // aligner can anchor on, using the same read-region maths the
-        // prompter's own goTo()/setCursorAtCurrentPosition() use.
-        const offset = editor.positionAt(0, prompter.position + prompter.topMargin);
-        tracker.reanchor(prompter.position, offset);
+        // aligner can anchor on, using the prompter's own inverse mapping.
+        tracker.reanchor(prompter.position, prompter.cursorForPosition());
     }
 
     onEnabledChanged: {

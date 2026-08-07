@@ -141,6 +141,15 @@ VoiceTracker::VoiceTracker(QObject *parent)
             d->confidence = result.confidence;
             d->lastConfident = result.confident;
             d->lastTokensPerSec = result.estimatedTokensPerSec;
+
+            // `coasting` is simply "the aligner does not trust this fix". The
+            // view follows confident fixes and holds still otherwise, so this
+            // is both the UI indicator and the gate on moving the prompter.
+            if (d->coasting != !result.confident) {
+                d->coasting = !result.confident;
+                emit coastingChanged();
+            }
+
             qCDebug(lcVoiceTracking)
                 << "aligned: offset" << result.charOffset
                 << "confidence" << result.confidence

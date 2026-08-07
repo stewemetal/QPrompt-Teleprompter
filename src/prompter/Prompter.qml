@@ -120,9 +120,23 @@ Flickable {
     readonly property real __relativeSpeed: (__speed * fontSize/2 * ((__vw-__evw/2) / __vw)) // Adjust relative to viewport widths and font size.
     readonly property real __travelDistance: position + topMargin - __jitterMargin
     readonly property real __timeToEnd: 2 * (editor.height + fontSize - __travelDistance) / __relativeSpeed // In seconds, used for Timer.
-    readonly property real __timeToArival: __i ? ((__possitiveDirection ? __timeToEnd : 2 * __travelDistance / __relativeSpeed)) * 1000 : 0 // In milliseconds, used for animation.
+    // True while something else owns the scroll position -- currently voice
+    // tracking, which moves the view to wherever the speaker actually is.
+    //
+    // The timed scroll works by riding a single long animation to the far end of
+    // the document, so it cannot simply be paused from outside: every velocity
+    // control writes __i imperatively (toggle(), setVelocity(), the velocity
+    // keys), and any Binding placed on __i from another component is clobbered
+    // by the next such write. Gating the two properties that turn __i into
+    // motion is the one place that covers all of them: with no destination and
+    // no duration, the ride is never armed, whoever set __i and whenever.
+    //
+    // __i itself is deliberately left alone, so the user's chosen speed is
+    // remembered and takes effect again the moment this clears.
+    property bool scrollDrivenExternally: false
+    readonly property real __timeToArival: (__i && !scrollDrivenExternally) ? ((__possitiveDirection ? __timeToEnd : 2 * __travelDistance / __relativeSpeed)) * 1000 : 0 // In milliseconds, used for animation.
     property real timeToArival: __timeToArival
-    readonly property int __destination: __i  ? (__possitiveDirection ? editor.height+fontSize-__jitterMargin : __jitterMargin)-topMargin : position
+    readonly property int __destination: (__i && !scrollDrivenExternally) ? (__possitiveDirection ? editor.height+fontSize-__jitterMargin : __jitterMargin)-topMargin : position
     // At start and at end rules
     readonly property bool __atStart: position<=__jitterMargin-topMargin+2
     readonly property bool __atEnd: position>=editor.height-topMargin+fontSize+__jitterMargin-2
@@ -628,6 +642,39 @@ Flickable {
         namedMarkerConfiguration.open();
     }
 
+    // Distance from the top of the viewport to the middle of the read region.
+    // The single definition of "where the line being read sits on screen",
+    // shared by every mapping between a cursor position and a scroll position.
+    readonly property real __readRegionOffset: overlay.__readRegionPlacement*(overlay.height-overlay.readRegionHeight)+overlay.readRegionHeight/2
+
+    // Scroll position that puts `cursorPosition` in the read region.
+    // Moving the cursor is a side effect of measuring, so it is put back.
+    function positionForCursor(cursorPosition) {
+        const previous = editor.cursorPosition
+        editor.cursorPosition = cursorPosition
+        const y = editor.cursorRectangle.y
+        editor.cursorPosition = previous
+        return y - __readRegionOffset + 1
+    }
+
+    // Character offset currently sitting in the read region. Inverse of
+    // positionForCursor().
+    function cursorForPosition() {
+        return editor.positionAt(0, position + __readRegionOffset + 1)
+    }
+
+    // Scrolls so `cursorPosition` sits in the read region, easing over
+    // `durationMs` via the existing `Behavior on position`.
+    //
+    // Unlike goTo(), this does NOT touch __i or __iBackup, so it neither pauses
+    // nor re-arms the timed scroll. It is meant to be called repeatedly to
+    // follow something -- voice tracking -- where suspending the prompter on
+    // every update would defeat the purpose.
+    function scrollToOffset(cursorPosition, durationMs) {
+        timeToArival = durationMs
+        prompter.position = positionForCursor(cursorPosition)
+    }
+
     function goTo(cursorPosition) {
         const i = __i;
         __i = __iBackup
@@ -635,7 +682,7 @@ Flickable {
             __iBackup = 0
         // Direct placement in editor
         editor.cursorPosition = cursorPosition
-        prompter.position = editor.cursorRectangle.y - (overlay.__readRegionPlacement*(overlay.height-overlay.readRegionHeight)+overlay.readRegionHeight/2) + 1
+        prompter.position = editor.cursorRectangle.y - __readRegionOffset + 1
         __i = i;
         if (prompter.__play && i!==0)
             prompter.position = prompter.__destination
@@ -693,7 +740,7 @@ Flickable {
     }
 
     function setCursorAtCurrentPosition() {
-        editor.cursorPosition = editor.positionAt(0, position + overlay.__readRegionPlacement*(overlay.height-overlay.readRegionHeight)+overlay.readRegionHeight/2 + 1)
+        editor.cursorPosition = cursorForPosition()
     }
 
     function toggleWysiwyg() {
