@@ -1040,7 +1040,12 @@ Kirigami.ApplicationWindow {
         if (projectionManager.isEnabled)
             root.pageStack.currentItem.viewport.grabToImage(function(p) {
                 // Recount projections on each for loop iteration to prevent value from going stale because a window was closed from a different thread.
-                for (var i=0; i<projectionManager.projections.count; i++)
+                // Count the model we are writing to, not the Instantiator: the
+                // latter creates its delegates asynchronously, so its count lags
+                // the model while projections are being built and runs ahead of it
+                // while they are being torn down. This callback is also async, so
+                // the model may have been rebuilt since the grab was requested.
+                for (var i=0; i<projectionManager.model.count; i++)
                     projectionManager.model.setProperty(i, "p", String(p.url));
                 qmlutil.r(p);
             });

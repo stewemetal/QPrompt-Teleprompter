@@ -105,23 +105,33 @@ Item {
         var flip = this.defaultDisplayMode;
         const totalDisplays = displayModel.count;
         for (var i=0; i<Qt.application.screens.length; i++) {
+            const targetScreen = Qt.application.screens[i];
             for (var j=0; j<totalDisplays; j++)
-                if (Qt.application.screens[i].name===displayModel.get(j).name) {
+                if (targetScreen.name===displayModel.get(j).name) {
                     flip = displayModel.get(j).flipSetting;
                     break;
                 }
                 else
                     flip = this.defaultDisplayMode;
             // Comment the following line to debug with a single screen.
-            if (flip>0 /*&& Qt.application.screens[i].name!==screen.name*/)
+            if (flip>0 /*&& targetScreen.name!==screen.name*/)
+                // Size each projection to its own screen, not to the whole virtual
+                // desktop. Screen.desktopAvailableWidth/Height describe the bounding
+                // box of all screens combined (they notify on desktopGeometryChanged),
+                // so using them made every projection window as wide as the entire
+                // desktop. Positioned at one screen's origin, such a window overlaps
+                // the neighbouring display more than its target, and the window
+                // manager then hands it to that neighbour, overriding the "screen"
+                // property below. On macOS this always landed projections on the
+                // built-in display. Screen.width/height are the per-screen values.
                 projectionModel.append ({
                     "id": i,
-                    "screen": Qt.application.screens[i],
-                    "name": Qt.application.screens[i].name, // + ' ' + Qt.application.screens[i].model + ' ' + Qt.application.screens[i].manufacturer,
-                    "x": Qt.application.screens[i].virtualX,
-                    "y": Qt.application.screens[i].virtualY,
-                    "width": Qt.application.screens[i].desktopAvailableWidth,
-                    "height": Qt.application.screens[i].desktopAvailableHeight,
+                    "screen": targetScreen,
+                    "name": targetScreen.name, // + ' ' + targetScreen.model + ' ' + targetScreen.manufacturer,
+                    "x": targetScreen.virtualX,
+                    "y": targetScreen.virtualY,
+                    "width": targetScreen.width,
+                    "height": targetScreen.height,
                     "flip": flip,//.projectionSetting,
                     "p": ""
                 });
@@ -154,12 +164,101 @@ Item {
         if (projectionManager.isEnabled)
             addMissingProjections();
     }
+    // Reconcile displayModel against the screens currently attached, preserving
+    // the flip setting of screens that are still present. Called on startup, when
+    // projection is switched on, and whenever a display is plugged or unplugged.
+    // Appending blindly here would duplicate rows every time it ran, and rebuilding
+    // from scratch would silently reset the user's per-screen mirroring choices.
     function setScreensModel() {
+        const screens = Qt.application.screens;
+        // Drop rows whose screen is no longer attached. Iterate backwards so that
+        // removing a row does not shift the indices still to be visited.
+        for (var j=displayModel.count-1; j>=0; j--) {
+            var stillAttached = false;
+            for (var k=0; k<screens.length; k++)
+                if (screens[k].name===displayModel.get(j).name) {
+                    stillAttached = true;
+                    break;
+                }
+            if (!stillAttached)
+                displayModel.remove(j);
+        }
+        // Add rows for screens we are not tracking yet, leaving known ones alone.
+        for (var i=0; i<screens.length; i++) {
+            var known = false;
+            for (var l=0; l<displayModel.count; l++)
+                if (displayModel.get(l).name===screens[i].name) {
+                    known = true;
+                    break;
+                }
+            if (!known)
+                displayModel.append({
+                    "name": screens[i].name,
+                    "flipSetting": 0
+                });
+        }
+    }
+    // True when projectionModel already holds exactly the projections project()
+    // would produce, in the same order.
+    //
+    // This walks the attached screens the same way project() does and compares
+    // the Screen objects themselves rather than their names. Comparing by name
+    // would be wrong in two ways: two monitors can report the same name, in
+    // which case only one would ever be counted and the second would never get
+    // a projection; and Qt caches the Screen wrappers in a vector it refreshes
+    // by index, so a wrapper can be rebound to a different display without its
+    // name changing here. Comparing object identity and flip is what actually
+    // determines whether the existing projection windows are still correct.
+    function projectionsMatchDisplays() {
+        const totalDisplays = displayModel.count;
+        let expected = 0;
         for (var i=0; i<Qt.application.screens.length; i++) {
-            displayModel.append({
-                "name": Qt.application.screens[i].name,
-                "flipSetting": 0
-            });
+            const targetScreen = Qt.application.screens[i];
+            var flip = this.defaultDisplayMode;
+            for (var j=0; j<totalDisplays; j++)
+                if (targetScreen.name===displayModel.get(j).name) {
+                    flip = displayModel.get(j).flipSetting;
+                    break;
+                }
+                else
+                    flip = this.defaultDisplayMode;
+            if (flip<=0)
+                continue;
+            // project() appends in screen order, so the n-th expected projection
+            // must be the n-th row for the models to be equivalent.
+            if (expected>=projectionModel.count)
+                return false;
+            var row = projectionModel.get(expected);
+            if (row.screen!==targetScreen || row.flip!==flip)
+                return false;
+            expected++;
+        }
+        return expected===projectionModel.count;
+    }
+    // Re-sync when a display is attached or detached. Without this, displayModel
+    // was only ever built at startup and when projection was switched on, so a
+    // screen plugged in later had no row and putDisplayFlip() silently did
+    // nothing: the menu listed the new screen but selecting it had no effect.
+    //
+    // Rearranging or resizing a display is reported by the Screen object's own
+    // geometry signals, which the delegate binds to directly, so that case needs
+    // no work here. screensChanged itself is driven by screens being added and
+    // removed and by the primary screen changing; of those, a primary-screen
+    // change need not alter which screens we project onto. Rebuilding
+    // unconditionally would destroy and recreate every projection window,
+    // blanking working projections mid-session, so rebuild only when the
+    // projections actually differ from what project() would now produce.
+    //
+    // Rebuilding goes through addMissingProjections() rather than calling
+    // project() directly, so that the Windows guard added in c6b9f5e still
+    // applies: on Windows, projections are only rebuilt when one needs adding,
+    // never when one needs removing, which used to crash.
+    Connections {
+        target: Qt.application
+        function onScreensChanged() {
+            projectionManager.setScreensModel();
+            if (projectionManager.isEnabled && !projectionManager.projectionsMatchDisplays())
+                projectionManager.addMissingProjections();
         }
     }
     Component.onCompleted: {
@@ -180,10 +279,25 @@ Item {
             transientParent: root
             screen: model.screen
             modality: Qt.NonModal
-            x: model.x
-            y: model.y
-            width: model.width
-            height: model.height
+            // Track the screen's live geometry rather than the values snapshotted
+            // into the model by project(). ListModel stores the Screen object
+            // itself, so these stay bound to virtualX/virtualY/width/height and
+            // follow the display when it is rearranged, resized or rotated while
+            // a projection is open.
+            //
+            // When a display is detached, Qt nulls the QScreen the wrapper holds
+            // (it keeps it in a QPointer) while the wrapper object itself stays
+            // alive, so testing the wrapper for null would not catch it and the
+            // accessors collapse to 0. Fall back to the geometry snapshotted by
+            // project() in that case, so a delegate that briefly outlives its
+            // screen keeps its last known size instead of shrinking to nothing.
+            readonly property bool screenAttached: model.screen
+                                                   && model.screen.width>0
+                                                   && model.screen.height>0
+            x: screenAttached ? model.screen.virtualX : model.x
+            y: screenAttached ? model.screen.virtualY : model.y
+            width: screenAttached ? model.screen.width : model.width
+            height: screenAttached ? model.screen.height : model.height
             visibility:
                 if (!root.visible || (model.name===root.screen.name && Qt.platform.os==="windows"))
                     return ApplicationWindow.Hidden
