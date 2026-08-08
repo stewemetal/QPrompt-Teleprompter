@@ -145,6 +145,12 @@ public:
         size_t bandBackward = 25;       // local band extent behind each mode
         size_t bandForward = 130;       // local band extent ahead of each mode
         size_t maxModes = 5;            // distinct location modes kept
+        // Script tokens per "region" for the prune's diversity rule. One
+        // representative of each region survives, so a repeated phrase cannot
+        // crowd its rivals out of the beam and manufacture a false margin.
+        // Roughly a long sentence: small enough to separate distant repeats,
+        // large enough not to bloat the beam.
+        size_t regionTokens = 40;
 
         // Transition log-probabilities (unnormalized; relative values matter)
         double logStay = -1.6;          // i -> i     (filler, ASR insertion)
@@ -153,6 +159,26 @@ public:
         double logSkipPerToken = -0.28; // geometric growth per skipped token
         double logBackward = -3.4;      // small backward step (re-reading)
         double logRecovery = -11.0;     // distant jump, gated on low confidence
+
+        // Cold-start tilt towards the top of the script, applied across the
+        // whole document (0 at the first token, this value at the last). Readers
+        // usually start at the beginning, so this breaks ties between repeated
+        // phrases in favour of the earliest copy without forbidding a mid-script
+        // start.
+        double logStartBias = -2.0;
+
+
+        // Extra cost for landing in script that has already been read aloud.
+        // Scripts repeat words -- "QPrompt" appears eleven times in the demo
+        // text -- and a repeat behind the reader scores just as well as the
+        // real position, so the view snaps backwards to a line already spoken.
+        // Text before the high-water mark is not where the speaker is, unless
+        // they have genuinely gone back, which this is small enough to allow.
+        double logAlreadySpoken = -2.6;
+        // Re-reading within this many tokens of the high-water mark is normal
+        // (correcting a stumble, repeating a phrase for a second take), so it
+        // is not penalised at all.
+        size_t spokenGraceTokens = 12;
 
         // Observation model
         double matchBonus = 2.4;        // log-LR for an exact normalized match
@@ -251,6 +277,14 @@ private:
     double m_confidence = 0.0;
     double m_tokensPerSec = 0.0;
     bool m_hasPosition = false;
+
+
+
+    // Furthest point the speaker has been confidently placed at. Script before
+    // this has already been read aloud, so a later match landing behind it is
+    // far more likely to be a repeated phrase than the reader going back.
+    // See kSpokenPenalty in aligner.cpp.
+    size_t m_spokenThrough = 0;
 
     double m_lastAudioTimeSec = 0.0;
     double m_lowConfidenceSince = -1.0;

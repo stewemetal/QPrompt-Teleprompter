@@ -82,6 +82,13 @@ class VoiceTracker : public QObject
     // Posterior confidence in [0, 1], for diagnostics and a UI meter.
     Q_PROPERTY(double confidence READ confidence NOTIFY trackingUpdated)
 
+    // Estimated reading rate in script tokens per second, smoothed. Recognition
+    // is inherently behind the speaker -- whisper needs a window of audio before
+    // it can report anything -- so the view lags by roughly this rate times that
+    // latency. Published so QML can lead by that distance and put the line being
+    // spoken in the read region rather than the line just finished.
+    Q_PROPERTY(double tokensPerSecond READ tokensPerSecond NOTIFY trackingUpdated)
+
     // Last error, empty when fine. Shown to the user rather than logged and
     // forgotten -- a silent microphone failure is indistinguishable from the
     // feature not working.
@@ -100,6 +107,7 @@ public:
     bool modelAvailable() const;
     bool isCoasting() const;
     double confidence() const;
+    double tokensPerSecond() const;
     QString errorString() const;
 
 public slots:

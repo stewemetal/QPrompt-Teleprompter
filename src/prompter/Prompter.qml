@@ -687,8 +687,15 @@ Flickable {
     // follow something -- voice tracking -- where suspending the prompter on
     // every update would defeat the purpose.
     function scrollToOffset(cursorPosition, durationMs) {
+        scrollToPosition(positionForCursor(cursorPosition), durationMs)
+    }
+
+    // Scrolls to an absolute position, easing over `durationMs`. Separate from
+    // scrollToOffset() because a follower may want to aim slightly ahead of the
+    // line it matched rather than exactly at it.
+    function scrollToPosition(y, durationMs) {
         timeToArival = durationMs
-        prompter.position = positionForCursor(cursorPosition)
+        prompter.position = Math.max(0, y)
     }
 
     function goTo(cursorPosition) {

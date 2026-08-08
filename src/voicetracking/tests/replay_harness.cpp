@@ -59,6 +59,11 @@ constexpr double kLineHeightPx = 40.0;
 constexpr double kTokensPerLine = 7.0;
 constexpr double kPxPerToken = kLineHeightPx / kTokensPerLine;
 
+// Mirrors VoiceTracking.qml's follow rules, so the harness measures the
+// behaviour the view actually produces rather than the aligner's raw output.
+constexpr double kOpeningAgreementPx = 8 * kPxPerToken;
+constexpr double kBackwardTolerancePx = 120.0;
+
 std::string readFile(const std::string &path, bool *ok)
 {
     std::ifstream in(path, std::ios::binary);
@@ -170,6 +175,10 @@ int main(int argc, char **argv)
     size_t lastTokenIndex = 0;
     double maxStepPx = 0.0;
     bool sawBackwardScroll = false;
+    bool haveOpening = false;
+    bool havePending = false;
+    double pendingPx = 0.0;
+    double pendingAudioSec = -1.0;
     bool sawNonFinite = false;
 
     recognizer.setObservationCallback([&](const Observation &observation) {
@@ -185,13 +194,43 @@ int main(int argc, char **argv)
             static_cast<double>(result.tokenIndex) * kPxPerToken;
 
         // Follow: a trusted match moves the view to that line, anything else
-        // leaves it exactly where it is. This mirrors VoiceTracking.qml.
+        // leaves it exactly where it is. This mirrors VoiceTracking.qml,
+        // including the two rules that keep the view from lurching.
         if (result.confident) {
             const double step = targetPx - positionPx;
-            if (step < 0.0)
-                sawBackwardScroll = true;
-            maxStepPx = std::max(maxStepPx, std::abs(step));
-            positionPx = targetPx;
+
+            // 1. Confirm the opening. Until the view has committed to a
+            //    position, a match may be a repeated phrase elsewhere in the
+            //    script; wait for a second fix from LATER audio that agrees.
+            bool act = true;
+            if (!haveOpening) {
+                const bool agrees = havePending
+                    && std::abs(targetPx - pendingPx) <= kOpeningAgreementPx;
+                const bool laterAudio = nowSec > pendingAudioSec + 1e-6;
+                if (agrees && laterAudio) {
+                    haveOpening = true;
+                } else {
+                    if (!agrees) {
+                        pendingPx = targetPx;
+                        pendingAudioSec = nowSec;
+                        havePending = true;
+                    }
+                    act = false;
+                }
+            }
+
+            // 2. Ignore small backward corrections. Alignment refines itself as
+            //    whisper firms up a window, and a token or two of backtrack is
+            //    invisible as a number but reads as a glitch on screen.
+            if (act && step < 0.0 && -step < kBackwardTolerancePx)
+                act = false;
+
+            if (act) {
+                if (step < 0.0)
+                    sawBackwardScroll = true;
+                maxStepPx = std::max(maxStepPx, std::abs(step));
+                positionPx = targetPx;
+            }
         }
 
         if (!std::isfinite(positionPx))
@@ -199,7 +238,13 @@ int main(int argc, char **argv)
 
         if (result.confident) {
             ++confidentCount;
-            if (result.tokenIndex + 3 < lastTokenIndex)
+            // Counted only once the view has committed to a position. Before
+            // that the aligner is still deciding between candidate openings and
+            // will legitimately report distant alternatives; those never reach
+            // the screen, so counting them measures the search rather than the
+            // behaviour. What matters is that the position never walks
+            // backwards once the reader is being followed.
+            if (haveOpening && result.tokenIndex + 3 < lastTokenIndex)
                 ++backwardJumps;
             lastTokenIndex = result.tokenIndex;
             maxTokenIndex = std::max(maxTokenIndex, result.tokenIndex);

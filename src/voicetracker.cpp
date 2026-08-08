@@ -152,6 +152,14 @@ QString VoiceTracker::language() const { return d->language; }
 QString VoiceTracker::modelPath() const { return d->modelPath; }
 bool VoiceTracker::isCoasting() const { return d->coasting; }
 double VoiceTracker::confidence() const { return d->confidence; }
+double VoiceTracker::tokensPerSecond() const
+{
+#ifdef QPROMPT_VOICE_TRACKING
+    return d->lastTokensPerSec;
+#else
+    return 0.0;
+#endif
+}
 QString VoiceTracker::errorString() const { return d->errorString; }
 
 bool VoiceTracker::modelAvailable() const

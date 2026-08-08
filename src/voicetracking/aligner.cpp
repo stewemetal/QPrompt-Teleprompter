@@ -67,6 +67,7 @@ void Aligner::reset()
     m_reacquireCandidate = 0;
     m_reacquireWins = 0;
     m_lastInformativeWeight = 0.0;
+    m_spokenThrough = 0;
 }
 
 void Aligner::reanchor(size_t charOffset)
@@ -102,6 +103,10 @@ void Aligner::reanchor(size_t charOffset)
     m_bestIndex = index;
     m_hasPosition = true;
     m_confidence = 1.0;
+    // An explicit re-anchor is the user overruling us. If they went back, the
+    // script after this point has NOT been read yet, so the high-water mark
+    // follows them down; otherwise it would penalise everything ahead of them.
+    m_spokenThrough = index;
 }
 
 // ---------------------------------------------------------------------------
@@ -152,12 +157,23 @@ void Aligner::stepToken(const std::string &observed)
     }
     const size_t tokenCount = m_script.tokenCount();
 
-    // Cold start: no beam yet. Seed uniformly across the whole script so the
-    // first observations can land anywhere, rather than assuming token 0.
+    // Cold start: no beam yet. Seed across the whole script so the first
+    // observations can land anywhere -- a speaker may well start from the
+    // middle -- but tilt the prior towards the beginning.
+    //
+    // Without the tilt every occurrence of a repeated phrase starts out equally
+    // likely, and on a script that names itself eleven times the first window
+    // lands on whichever copy whisper's partial transcript happens to favour.
+    // That is what made the prompter open deep in the text and then snap back
+    // to the top once more words arrived. The tilt is small: a few tokens of
+    // real evidence overrides it, so starting mid-script still works, it just
+    // has to be earned rather than assumed.
     if (m_beam.empty()) {
         m_beam.reserve(tokenCount);
+        const double denominator = std::max<double>(1.0, static_cast<double>(tokenCount));
         for (size_t i = 0; i < tokenCount; ++i) {
-            m_beam.push_back(State{i, 0.0});
+            const double fraction = static_cast<double>(i) / denominator;
+            m_beam.push_back(State{i, m_config.logStartBias * fraction});
         }
     }
 
@@ -166,7 +182,17 @@ void Aligner::stepToken(const std::string &observed)
     std::unordered_map<size_t, double> next;
     next.reserve(m_beam.size() * 8);
 
-    auto addTo = [&next](size_t index, double logProb) {
+    // Everything already read aloud is discounted, whichever transition leads
+    // there. Applying it here rather than on the backward transition alone
+    // matters: a repeated phrase is usually reached by a RECOVERY jump or a
+    // long skip, not by stepping back one token at a time.
+    const size_t spokenLimit =
+        m_spokenThrough > m_config.spokenGraceTokens
+            ? m_spokenThrough - m_config.spokenGraceTokens
+            : 0;
+    auto addTo = [&next, spokenLimit, this](size_t index, double logProb) {
+        if (index < spokenLimit)
+            logProb += m_config.logAlreadySpoken;
         auto it = next.find(index);
         if (it == next.end()) {
             next.emplace(index, logProb);
@@ -273,7 +299,50 @@ void Aligner::normalizeAndPrune()
                           [](const State &a, const State &b) {
                               return a.logProb > b.logProb;
                           });
-        m_beam.resize(m_config.beamWidth);
+
+        // Before truncating, keep the best surviving state from each distinct
+        // region of the script.
+        //
+        // A plain top-N prune is what let a repeated phrase report false
+        // certainty. Matching a word that occurs eleven times seeds a cluster
+        // around EVERY occurrence, but the winning cluster's neighbours crowd
+        // the beam and the rival occurrences fall off the end. The margin gate
+        // below then compares the winner against its own neighbours -- which is
+        // no contest -- and reports near-total confidence for a position chosen
+        // essentially at random among the copies.
+        //
+        // Retaining one representative per region keeps those rivals in play,
+        // so the margin measures what it is meant to: how much better this
+        // location is than the best ALTERNATIVE location. When several copies
+        // fit equally the margin collapses, the fix is reported unconfident,
+        // and the view holds still until the wording diverges -- which is the
+        // honest answer, because until then the speaker's position genuinely
+        // is ambiguous.
+        std::vector<State> survivors(m_beam.begin(),
+                                     m_beam.begin() + static_cast<long>(m_config.beamWidth));
+        if (m_config.regionTokens > 0) {
+            std::unordered_map<size_t, double> keptBest;
+            for (const State &s : survivors)
+                keptBest[s.index / m_config.regionTokens] =
+                    std::max(keptBest.count(s.index / m_config.regionTokens)
+                                 ? keptBest[s.index / m_config.regionTokens]
+                                 : kNegInf,
+                             s.logProb);
+
+            std::unordered_map<size_t, State> rescued;
+            for (auto it = m_beam.begin() + static_cast<long>(m_config.beamWidth);
+                 it != m_beam.end(); ++it) {
+                const size_t region = it->index / m_config.regionTokens;
+                if (keptBest.count(region))
+                    continue;  // that region already has a representative
+                auto found = rescued.find(region);
+                if (found == rescued.end() || it->logProb > found->second.logProb)
+                    rescued[region] = *it;
+            }
+            for (const auto &entry : rescued)
+                survivors.push_back(entry.second);
+        }
+        m_beam.swap(survivors);
     }
 
     // Normalize with log-sum-exp so log-probabilities stay bounded and
@@ -770,6 +839,13 @@ AlignResult Aligner::update(const Observation &observation)
 
     AlignResult result = currentEstimate();
     result.confident = confident;
+
+    // Advance the high-water mark on a trusted fix. A doubtful one must not move
+    // it: if it were wrong, the penalty would then defend a position the speaker
+    // never reached and fight every correct match after it.
+    if (confident)
+        m_spokenThrough = std::max(m_spokenThrough, result.tokenIndex);
+
     return result;
 }
 

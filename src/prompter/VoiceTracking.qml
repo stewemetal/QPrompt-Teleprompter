@@ -77,6 +77,27 @@ QtObject {
     // matches join into continuous motion instead of a series of visible jumps.
     readonly property int __followMs: 500
 
+    // Backward moves smaller than this are treated as alignment jitter and
+    // ignored; larger ones are taken as the reader genuinely going back. About
+    // two lines at a typical prompting size.
+    readonly property int __backwardTolerancePx: 120
+
+    // How far behind the speaker recognition runs, in seconds. whisper reports
+    // on a window of audio, so a match describes speech from roughly this long
+    // ago. Used with the measured reading rate to lead the view.
+    readonly property real __latencySeconds: 1.2
+
+    // Rough number of script tokens on a rendered line. Only used to size the
+    // lead, where being off by a word costs a few pixels of aim.
+    readonly property real __tokensPerLine: 7.0
+
+    // How close the confirming match must be for the opening to be accepted,
+    // and how much later it must arrive. The delay is what makes it independent
+    // evidence: whisper restates the same window several times as it firms up,
+    // and those restatements agree with each other by construction.
+    readonly property int __openingAgreementPx: 60
+    readonly property int __openingAgreementMs: 700
+
     readonly property VoiceTracker __tracker: VoiceTracker {
         id: tracker
 
@@ -119,23 +140,10 @@ QtObject {
 
     function stop() {
         tracker.stop();
+        __opened = false;
+        __pendingAt = -1;
     }
 
-    // Hold the timed scroll at a standstill for as long as tracking is running.
-    //
-    // While following a voice, the voice is the only thing that should move the
-    // text: left running, the constant-speed scroll drifts on through every
-    // pause and the two sources fight over the same position. A Binding rather
-    // than a one-off assignment because entering prompting mode sets __i itself,
-    // after this component has already started -- so the value has to be held,
-    // not just set once. Restoring the binding on `when` going false hands the
-    // user's own speed straight back.
-    // Hold the timed scroll at a standstill for as long as tracking is running.
-    //
-    // While following a voice, the voice is the only thing that should move the
-    // text: left running, the constant-speed scroll drifts on through every
-    // pause and the two sources fight over the same position.
-    //
     // Take over as the prompter's scroll driver while listening, and hand it
     // back the moment we stop. Selecting Voice suspends the timed ride; without
     // that the constant-speed scroll keeps carrying the view through every pause
@@ -155,12 +163,91 @@ QtObject {
     // here: the prompter owns where the read region is and how the view eases
     // there, and duplicating that would give voice tracking its own subtly
     // different idea of where "the current line" sits.
+    // Acquisition state. Until the view has committed to a position, a match may
+    // just as well be a repeated phrase elsewhere in the script, so the first
+    // one is held until a later one agrees. See the gate in __followTo().
+    property bool __opened: false
+    property real __pendingPx: 0
+    property real __pendingAt: -1
+
     function __followTo(characterOffset) {
         const clamped = Math.max(0, Math.min(characterOffset, editor.length));
-        const target = prompter.positionForCursor(clamped);
-        if (Math.abs(target - prompter.position) < __deadbandPx)
+
+        // Aim ahead of the words just recognised.
+        //
+        // Recognition is unavoidably behind the speaker: whisper needs a window
+        // of audio before it can report anything, so by the time a match lands
+        // the reader has already moved on. Putting the matched word in the read
+        // region therefore shows the line just FINISHED, and the reader is
+        // permanently reading below it.
+        //
+        // Lead by however far they travel during that latency -- their measured
+        // rate times the delay -- so the read region holds the words being
+        // spoken now. The rate is measured rather than assumed, so a fast reader
+        // gets a proportionally larger lead. This is the "some autoscrolling in
+        // voice mode" effect: motion between matches still comes from the voice,
+        // it is just aimed where the voice will be rather than where it was.
+        const leadTokens = tracker.tokensPerSecond * __latencySeconds;
+        const target = prompter.positionForCursor(clamped)
+                     + leadTokens * __pixelsPerToken();
+        const delta = target - prompter.position;
+
+        if (Math.abs(delta) < __deadbandPx)
             return;
-        prompter.scrollToOffset(clamped, __followMs);
+
+        // Confirm the opening before moving at all.
+        //
+        // At the start of a read nothing constrains where the speaker might be,
+        // so a script that repeats a distinctive phrase -- the demo text names
+        // itself eleven times -- offers several equally good matches, and
+        // whisper's first partial transcript picks one essentially at random.
+        // Acting on it makes the prompter open in the wrong paragraph and then
+        // lurch across the document once more words arrive.
+        //
+        // Waiting for a second match that agrees, taken a beat later so it rests
+        // on speech the first one had not heard, removes that entirely: a
+        // spurious copy rarely wins twice. It costs a moment of stillness at the
+        // very start, which is a good trade for never opening in the wrong place.
+        if (!__opened) {
+            const now = Date.now();
+            const agrees = __pendingAt >= 0
+                        && Math.abs(target - __pendingPx) <= __openingAgreementPx;
+            if (agrees && now - __pendingAt >= __openingAgreementMs) {
+                __opened = true;
+            } else {
+                if (!agrees) {
+                    __pendingPx = target;
+                    __pendingAt = now;
+                }
+                return;
+            }
+        }
+
+        // Never walk the text backwards by a line or two.
+        //
+        // The aligner refines its estimate as whisper firms up a window, so a
+        // fix can land a token or two behind the last one even while the reader
+        // is moving steadily forward. Correcting for that is invisible as a
+        // number and very visible on screen: the text twitches upward mid-line,
+        // which reads as a glitch and costs the reader their place.
+        //
+        // A genuine backward move -- the reader restarting a paragraph -- is far
+        // larger than this, so it still gets through. Anything smaller is
+        // jitter, and holding position is the honest response.
+        if (delta < 0 && -delta < __backwardTolerancePx)
+            return;
+
+        prompter.scrollToPosition(target, __followMs);
+    }
+
+    // Rendered width of one script token, used to convert the lead from tokens
+    // into pixels. Measured from the document rather than assumed: font size and
+    // wrap width are the view's business and the user changes both.
+    function __pixelsPerToken() {
+        const lineHeight = editor.cursorRectangle.height > 0
+                         ? editor.cursorRectangle.height
+                         : prompter.fontSize;
+        return lineHeight / __tokensPerLine;
     }
 
     // A manual scroll or a marker jump means the user has told us where they
@@ -181,6 +268,8 @@ QtObject {
         // Map the current scroll position back to a character offset the
         // aligner can anchor on, using the prompter's own inverse mapping.
         tracker.reanchor(prompter.position, prompter.cursorForPosition());
+        __opened = true;
+        __pendingAt = -1;
     }
 
     onEnabledChanged: {
