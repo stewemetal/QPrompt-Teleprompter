@@ -29,6 +29,7 @@
 #include <QDebug>
 #include <QDir>
 #include <QFontDatabase>
+#include <QSet>
 #include <QIcon>
 #include <QQmlApplicationEngine>
 #include <QQmlFileSelector>
@@ -337,13 +338,49 @@ KirigamiPlugin::getInstance().registerTypes();
             // Build tree: build/bin/QPrompt.app/Contents/MacOS -> build/bin
             appDir.absoluteFilePath(QStringLiteral("../../..")),
         };
+        // Deduplicate on the CANONICAL path, not the string. In a deployed
+        // bundle Qt has already added Contents/Resources/qml itself, and adding
+        // it a second time under a different spelling makes the engine register
+        // each module twice:
+        //
+        //     Cannot add multiple registrations for org.kde.kirigami.platform
+        //
+        // which aborts before the first window. removeDuplicates() compares
+        // strings, so it does not catch "…/Contents/Resources/qml" arriving
+        // once from Qt and once as "…/Contents/MacOS/../Resources/qml".
         QStringList importPaths;
+        QSet<QString> seen;
+        const auto appendUnique = [&](const QString &path) {
+            const QString cleaned = QDir::cleanPath(path);
+            if (cleaned.isEmpty())
+                return;
+            // Compare on the canonical path so two spellings of one directory
+            // collapse, but keep the cleaned path as the value: canonicalPath()
+            // is empty for a directory that does not exist, and it also rewrites
+            // symlinks (this repo lives under Dropbox's CloudStorage links),
+            // which would silently drop paths that resolve perfectly well.
+            const QString canonical = QDir(cleaned).canonicalPath();
+            const QString key = canonical.isEmpty() ? cleaned : canonical;
+            if (seen.contains(key))
+                return;
+            seen.insert(key);
+            importPaths.append(cleaned);
+        };
         for (const QString &path : preferredPaths) {
+            // Only our own candidates are probed: two of the three never exist
+            // in any given layout, and a non-existent import path is noise the
+            // engine walks on every lookup.
             if (QDir(path).exists())
-                importPaths.append(QDir::cleanPath(path));
+                appendUnique(path);
         }
-        importPaths.append(engine.importPathList());
-        importPaths.removeDuplicates();
+        for (const QString &path : engine.importPathList()) {
+            // Leave qrc: and other non-filesystem entries exactly as they are;
+            // canonicalPath() is meaningless for them and returns empty.
+            if (path.startsWith(QLatin1Char(':')) || path.contains(QLatin1String("://")))
+                importPaths.append(path);
+            else
+                appendUnique(path);
+        }
         engine.setImportPathList(importPaths);
     }
 #endif
