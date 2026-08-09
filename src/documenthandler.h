@@ -327,6 +327,7 @@ private:
 
     enum ImportFormat { NONE, PDF, ODT, DOCX, DOC, RTF, ABW, EPUB, MOBI, AZW, PAGES, PAGESX };
     void updateContents(const QString &text, Qt::TextFormat format);
+    void normalizeMarkdownFormatting();
 #if !(defined(Q_OS_ANDROID) || defined(Q_OS_IOS) || defined(Q_OS_WASM) || defined(Q_OS_WATCHOS))
     QString import(const QString &fileName, ImportFormat);
 #endif

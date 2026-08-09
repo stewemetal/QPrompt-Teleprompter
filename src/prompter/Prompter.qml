@@ -2403,7 +2403,16 @@ Flickable {
             positionBackup = prompter.position;
         }
         onLoaded: (format) => {
-            editor.textFormat = format
+            // By the time this fires, DocumentHandler has already parsed the file
+            // into the shared QTextDocument, so the editor is always displaying
+            // rich text regardless of what the file on disk was. `format` says
+            // what the source was, not what the document now is: assigning it to
+            // textFormat makes TextArea re-serialise and re-parse the document
+            // through that format, which for Markdown throws away the parsed
+            // structure and shows the raw "# heading" source instead.
+            // Plain text is the one case we must not interpret as rich text,
+            // since stray '<' or '&' in the script would be eaten as markup.
+            editor.textFormat = (format === Qt.PlainText) ? TextEdit.PlainText : TextEdit.RichText
             editorToolbar.lineHeightSlider.update()
             editorToolbar.paragraphSpacingSlider.update()
             if (document.comesFromNetwork) {

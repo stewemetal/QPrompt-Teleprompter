@@ -116,6 +116,7 @@
 #include <QTemporaryFile>
 #include <QTextBlock>
 #include <QTextDocument>
+#include <QTextFragment>
 #include <QDrag>
 #include <QTextDocumentFragment>
 #include <QTimer>
@@ -949,16 +950,30 @@ void DocumentHandler::load(const QUrl &fileUrl)
             if (QTextDocument *doc = textDocument()) {
                 doc->setBaseUrl(path.adjusted(QUrl::RemoveFilename));
                 // File formats managed by Qt
+                //
+                // Markdown is tested before HTML on purpose. Depending on the
+                // platform's shared-mime-info version, a .md file resolves to
+                // "text/markdown" or to "text/x-web-markdown" — and the latter
+                // inherits text/html, so an inherits("text/html") test upstream
+                // would swallow Markdown and feed the raw source to insertHtml,
+                // which renders the literal "# heading" and collapses the
+                // paragraph breaks. Matching the suffix as well keeps this
+                // working on systems whose MIME database knows neither name.
+#if QT_VERSION >= 0x050F00
+                const QString suffix = QFileInfo(fileName).suffix().toLower();
+                const bool isMarkdown = mime.inherits(QLatin1String("text/markdown"))
+                    || mime.name() == QLatin1String("text/x-web-markdown")
+                    || suffix == QLatin1String("md") || suffix == QLatin1String("markdown");
+                if (isMarkdown)
+                    updateContents(QString::fromUtf8(data), Qt::MarkdownText);
+                else
+#endif
                 if (mime.inherits(QLatin1String("text/html"))) {
                     static QRegularExpression regex_0(QLatin1String(
                         "((font-size|letter-spacing|word-spacing|font-weight):\\s*-?[\\d]+(?:.[\\d]+)*(?:(?:px)|(?:pt)|(?:em)|(?:ex));?\\s*)"));
                     QString html = QString::fromUtf8(data).replace(regex_0, QLatin1String(""));
                     updateContents(html, Qt::RichText);
                 }
-#if QT_VERSION >= 0x050F00
-                else if (mime.inherits(QLatin1String("text/markdown")))
-                    updateContents(QString::fromUtf8(data), Qt::MarkdownText);
-#endif
                 // File formats imported using external software
                 else {
 #if !(defined(Q_OS_ANDROID) || defined(Q_OS_IOS) || defined(Q_OS_WASM) || defined(Q_OS_WATCHOS))
@@ -1111,6 +1126,7 @@ void DocumentHandler::updateContents(const QString &text, Qt::TextFormat format)
         break;
     case Qt::MarkdownText:
         cursor.insertMarkdown(text);
+        normalizeMarkdownFormatting();
         break;
     case Qt::RichText:
         // Document metadata extraction would happen at this time
@@ -1120,6 +1136,77 @@ void DocumentHandler::updateContents(const QString &text, Qt::TextFormat format)
         break;
     }
     Q_EMIT loaded(format);
+}
+
+// Qt's Markdown parser bakes absolute point sizes and an explicit monospace
+// family into headings and code spans. In a teleprompter that is wrong: the
+// prompter drives one item-level font (Prompter.qml's `fontSize` alias onto
+// editor.font.pixelSize), and character-level sizes silently win over it, so
+// headings would ignore the size slider and render at a fixed — usually
+// unreadably small — size next to 100px+ body text.
+//
+// The HTML path already strips font-size/font-weight declarations by regex
+// before inserting (see load()). We can't regex Markdown, so we do the
+// equivalent on the parsed document: replace absolute sizes with proportional
+// ones, which preserves the heading hierarchy while letting the slider scale
+// the whole script. Bold/italic and other structure are left untouched.
+void DocumentHandler::normalizeMarkdownFormatting()
+{
+    QTextDocument *doc = textDocument();
+    if (!doc)
+        return;
+
+    // Heading emphasis, indexed by level 1-6, expressed as Qt's relative
+    // FontSizeAdjustment steps rather than absolute point sizes.
+    //
+    // This has to be relative. The prompter never sets a document-wide point
+    // size — it drives one item-level font.pixelSize from the size slider, so
+    // doc->defaultFont() carries an unrelated small value. Deriving concrete
+    // point sizes from it makes headings render *smaller* than body text.
+    // FontSizeAdjustment is resolved against whatever font the item is using,
+    // so the ramp keeps working at every slider position.
+    static const int headingSizeAdjustment[] = {0, 3, 2, 1, 1, 0, 0};
+
+    QTextCursor cursor(doc);
+    cursor.beginEditBlock();
+
+    for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
+        const int level = block.blockFormat().headingLevel();
+
+        for (QTextBlock::iterator it = block.begin(); !it.atEnd(); ++it) {
+            const QTextFragment fragment = it.fragment();
+            if (!fragment.isValid())
+                continue;
+
+            QTextCharFormat format = fragment.charFormat();
+
+            // Drop the parser's absolute sizing so the item-level font wins.
+            format.clearProperty(QTextFormat::FontPointSize);
+            format.clearProperty(QTextFormat::FontPixelSize);
+            format.clearProperty(QTextFormat::FontSizeAdjustment);
+            // Let the prompter's chosen font apply everywhere, including code
+            // spans: a teleprompter script is read aloud, not compiled, and a
+            // fallback monospace face at prompting size hurts legibility.
+            format.clearProperty(QTextFormat::FontFamilies);
+            format.clearProperty(QTextFormat::FontFamily);
+            format.setFontFixedPitch(false);
+
+            // Re-apply the heading ramp on top of the cleaned format. Bold
+            // keeps the deepest levels distinguishable, where the size step
+            // alone has run out of room.
+            if (level > 0) {
+                format.setProperty(QTextFormat::FontSizeAdjustment,
+                                   headingSizeAdjustment[qBound(1, level, 6)]);
+                format.setFontWeight(QFont::Bold);
+            }
+
+            cursor.setPosition(fragment.position());
+            cursor.setPosition(fragment.position() + fragment.length(), QTextCursor::KeepAnchor);
+            cursor.setCharFormat(format);
+        }
+    }
+
+    cursor.endEditBlock();
 }
 
 void DocumentHandler::unblockFileWatcher()
@@ -1147,13 +1234,18 @@ void DocumentHandler::saveAs(const QUrl &fileUrl)
     QString filePath = fileUrl.toString();
     QFile file(filePath);
     const bool isHtml = true;
+    const bool isMarkdown = false;
 #else
     QString filePath = fileUrl.toLocalFile();
     QFile file(filePath);
     QFileInfo fileInfo = QFileInfo(filePath);
-    const bool isHtml = fileInfo.suffix().contains(QLatin1String("html")) || fileInfo.suffix().contains(QLatin1String("htm"))
-        || fileInfo.suffix().contains(QLatin1String("xhtml")) || fileInfo.suffix().contains(QLatin1String("HTML"))
-        || fileInfo.suffix().contains(QLatin1String("HTM")) || fileInfo.suffix().contains(QLatin1String("XHTML"));
+    const QString suffix = fileInfo.suffix().toLower();
+    const bool isHtml = suffix.contains(QLatin1String("html")) || suffix.contains(QLatin1String("htm"))
+        || suffix.contains(QLatin1String("xhtml"));
+    // Markdown files must round-trip as Markdown. Falling through to
+    // toPlainText() would silently discard every heading, list and emphasis
+    // the moment a user saves a .md script they had just opened.
+    const bool isMarkdown = suffix == QLatin1String("md") || suffix == QLatin1String("markdown");
 #endif
 
     if (!file.open(QFile::WriteOnly | QFile::Truncate | (isHtml ? QFile::NotOpen : QFile::Text))) {
@@ -1161,7 +1253,7 @@ void DocumentHandler::saveAs(const QUrl &fileUrl)
         return;
     }
 
-    file.write((isHtml ? doc->toHtml() : doc->toPlainText()).toUtf8());
+    file.write((isHtml ? doc->toHtml() : isMarkdown ? doc->toMarkdown() : doc->toPlainText()).toUtf8());
     file.flush();
     file.close();
 
