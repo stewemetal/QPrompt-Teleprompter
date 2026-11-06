@@ -49,6 +49,7 @@ Makefile
 
 # Build folders
 **/build*
+.gradle/
 **/install*
 *.flatpak-builder*
 /dist/Snapcraft/*.snap
